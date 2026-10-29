@@ -1002,8 +1002,16 @@ test('an email holds no client text: the build keeps label characters only, and 
   post(env, body({ build: 'W2\nSheet: https://evil.example/a@b', rows: [finishRow({ client_time: 'yesterday', seconds: 'x' })] }));
   const lines = env.mail.sent[0].body.split('\n');
   assert.strictEqual(lines.length, 8);
-  assert.deepStrictEqual(lines.slice(2, 5), ['Build: W2?Sheet? https???evil.example?a?b', 'Start: unknown', 'Finish: unknown']);
+  assert.deepStrictEqual(lines.slice(2, 5), ['Build: W2?Sheet? https???evil?example?a?b', 'Start: unknown', 'Finish: unknown']);
   assert.ok(!lines.join('\n').includes('@'));
+  // A dot stays only between two digits: version labels keep theirs, and no domain name (which mail apps link) gets through.
+  const build = label => {
+    post(env, body({ build: label, rows: [finishRow()] }));
+    return env.mail.sent[env.mail.sent.length - 1].body.split('\n')[2];
+  };
+  assert.strictEqual(build('W2.1 1.2.1-W2.1'), 'Build: W2.1 1.2.1-W2.1');
+  assert.strictEqual(build('Sign in at www.lob-verify.com.'), 'Build: Sign in at www?lob-verify?com?');
+  assert.strictEqual(build('.5 a..1 9.'), 'Build: ?5 a??1 9?');
 });
 
 // ------------------------------------------------------------------ load-test.js (offline checks; it is never run here)

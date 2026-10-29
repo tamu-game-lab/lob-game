@@ -724,12 +724,17 @@ function removeDigestTrigger() {
 }
 
 /**
- * The build label as the emails show it: letters, digits, spaces and . _ - only (any other
- * character becomes ?), at most 60. It is the only text a post puts into an email, so a
- * forged post cannot add an address, a link or a line to one.
+ * The build label as the emails show it: letters, digits, spaces, _ and -, and a dot only
+ * between two digits (W2 1.2-W2); any other character becomes ?, and it stops at 60. It is
+ * the only text a post puts into an email, so a forged post cannot add a line, an address,
+ * a URL or a domain name (mail apps turn a bare "example.com" into a link) to one.
  */
 function emailBuild_(build) {
-  return String(build).replace(/[^A-Za-z0-9 ._-]/g, '?').slice(0, 60);
+  const digit = c => c >= '0' && c <= '9';
+  return String(build)
+    .replace(/[^A-Za-z0-9 ._-]/g, '?')
+    .replace(/\./g, (dot, i, text) => (digit(text.charAt(i - 1)) && digit(text.charAt(i + 1)) ? dot : '?'))
+    .slice(0, 60);
 }
 
 /** An ISO 8601 UTC time to the second, or '' when ms is not a valid time. */
