@@ -75,6 +75,10 @@ const EMAIL_MODES = ['off', 'session', 'digest'];
 // 6, 8 or 12 hours. One minute is left out, so a "1" meant as an hour is not taken.
 const DIGEST_MINUTES = [5, 10, 15, 30, 60, 120, 240, 360, 480, 720];
 const DIGEST_FUNCTION = 'sendDigest';
+// One digest lists at most this many queue lines, about 50 KB. MailApp refuses a body
+// over 200 KB on a personal account, so a longer queue goes out over several digests
+// instead of failing every run and never clearing.
+const DIGEST_MAX_LINES = 200;
 const ADDRESS_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 
 /**
@@ -554,11 +558,11 @@ function queueFinish_(ss, summary) {
 
 /**
  * Run by the time trigger that installDigestTrigger() makes: emails one list of the queued
- * sessions, one line each with the session email's fields, and the Sheet's link, then
- * deletes the lines it sent. An empty queue, or email_mode off, sends nothing. It holds
- * the script lock from reading the queue to deleting the lines (a second or two a run),
- * so no line arrives or is sent twice in between. A failure is logged, and the lines stay
- * queued for the next run.
+ * sessions (the first DIGEST_MAX_LINES; any more wait for the next run), one line each
+ * with the session email's fields, and the Sheet's link, then deletes the lines it sent.
+ * An empty queue, or email_mode off, sends nothing. It holds the script lock from reading
+ * the queue to deleting the lines (a second or two a run), so no line arrives or is sent
+ * twice in between. A failure is logged, and the lines stay queued for the next run.
  */
 function sendDigest() {
   try {
@@ -573,7 +577,7 @@ function sendDigest() {
     try {
       const queue = readQueue_(ss);
       if (queue.lines.length === 0) return;
-      sendMail_(settings, digestEmail_(ss, queue.lines));
+      sendMail_(settings, digestEmail_(ss, queue.lines, queue.left));
       queue.sheet.deleteRows(2, queue.rows);
       SpreadsheetApp.flush();
       console.log('digest sent sessions=' + queue.lines.length);
@@ -586,15 +590,17 @@ function sendDigest() {
 }
 
 /**
- * The digest_queue tab by header name: how many rows follow the header (rows), and the
- * lines among them that have a code (lines), each read back as a summary.
+ * The digest_queue tab by header name, up to DIGEST_MAX_LINES rows after the header: how
+ * many rows that is (rows), how many more follow (left), and the lines among the rows read
+ * that have a code (lines), each read back as a summary.
  */
 function readQueue_(ss) {
   const sheet = ss.getSheetByName(QUEUE_TAB);
   const lastRow = sheet ? sheet.getLastRow() : 0;
   const lastCol = sheet ? sheet.getLastColumn() : 0;
-  if (lastRow < 2 || lastCol < 1) return { sheet: sheet, rows: 0, lines: [] };
-  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  if (lastRow < 2 || lastCol < 1) return { sheet: sheet, rows: 0, left: 0, lines: [] };
+  const rows = Math.min(lastRow - 1, DIGEST_MAX_LINES);
+  const values = sheet.getRange(1, 1, rows + 1, lastCol).getValues();
   const header = values[0].map(h => String(h).trim());
   const cell = (line, name) => (header.indexOf(name) < 0 ? '' : String(line[header.indexOf(name)]).trim());
   const lines = values.slice(1).filter(line => cell(line, 'code') !== '').map(line => {
@@ -611,11 +617,14 @@ function readQueue_(ss) {
       added: added,
     };
   });
-  return { sheet: sheet, rows: lastRow - 1, lines: lines };
+  return { sheet: sheet, rows: rows, left: lastRow - 1 - rows, lines: lines };
 }
 
-/** The digest email: one line per queued session, with each code's total rows as they are now, then the Sheet's link. */
-function digestEmail_(ss, lines) {
+/**
+ * The digest email: one line per queued session, with each code's total rows as they are
+ * now, how many more lines wait (when left > 0), then the Sheet's link.
+ */
+function digestEmail_(ss, lines, left) {
   const totals = new Map();
   Object.keys(MODE_PREFIX).forEach(mode => {
     const codes = lines.filter(line => line.mode === mode).map(line => line.code);
@@ -627,9 +636,10 @@ function digestEmail_(ss, lines) {
       '; start ' + (line.start || 'unknown') + '; finish ' + (line.finish || 'unknown') +
       '; rows in the finishing post: ' + countsText_(line.added) + '; total rows for this code: ' + countsText_(total);
   });
+  const more = left > 0 ? [left + ' more wait in the digest_queue tab for the next digest.'] : [];
   return {
     subject: 'LOB digest: ' + lines.length + (lines.length === 1 ? ' session' : ' sessions') + ' finished',
-    body: text.concat(['', 'Sheet: ' + ss.getUrl()]).join('\n'),
+    body: text.concat(more, ['', 'Sheet: ' + ss.getUrl()]).join('\n'),
   };
 }
 

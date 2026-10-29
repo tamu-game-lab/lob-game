@@ -921,6 +921,25 @@ test('digest failures never fail a post or lose a line: a queue lock timeout is 
   assert.deepStrictEqual(tab(env, 'digest_queue').records(), []);
 });
 
+test('a long digest_queue goes out 200 lines a digest, under the 200 KB email body limit, until it is empty', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'digest' });
+  post(env, body({ rows: [finishRow()] }));
+  const queue = tab(env, 'digest_queue');
+  const first = queue.records()[0];
+  for (let i = 1; i < 1000; i++) queue.appendRow(queue.header().map(name => first[name])); // 1000 lines: about 230 KB in one email
+  env.context.sendDigest();
+  assert.strictEqual(env.mail.sent.length, 1, 'one email, not refused for its size');
+  assert.strictEqual(env.mail.sent[0].subject, 'LOB digest: 200 sessions finished');
+  assert.deepStrictEqual(env.mail.sent[0].body.split('\n').slice(200),
+    ['800 more wait in the digest_queue tab for the next digest.', '', 'Sheet: ' + SHEET_URL]);
+  assert.strictEqual(queue.records().length, 800, 'the 200 lines sent are deleted, the rest wait');
+  for (let run = 0; run < 4; run++) env.context.sendDigest();
+  assert.strictEqual(env.mail.sent.length, 5);
+  assert.ok(!env.mail.sent[4].body.includes('more wait'));
+  assert.deepStrictEqual(queue.records(), []);
+});
+
 test('health shows 1.1.0 and, once the settings tab exists, the effective email mode; a value it cannot use counts as off and is listed by key only', () => {
   const env = makeEnv();
   const health = () => get(env, { op: 'health' });

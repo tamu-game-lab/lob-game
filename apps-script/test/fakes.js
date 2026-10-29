@@ -12,9 +12,10 @@
  *   text and is not stored, "=..." becomes a formula, numeric text becomes a number,
  *   and TRUE/FALSE become booleans;
  * - cache entries expire on a clock the tests control, and a TTL over 6 h throws;
- * - MailApp.sendEmail takes the message object form ({to, subject, body}) and keeps
- *   what it would send; a time trigger runs every 1, 5, 10, 15 or 30 minutes or every
- *   1, 2, 4, 6, 8 or 12 hours, and any other interval throws.
+ * - MailApp.sendEmail takes the message object form ({to, subject, body}), refuses a
+ *   body over 200 KB (a personal account's limit), and keeps what it would send; a time
+ *   trigger runs every 1, 5, 10, 15 or 30 minutes or every 1, 2, 4, 6, 8 or 12 hours,
+ *   and any other interval throws.
  */
 
 const NUMBER_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
@@ -22,6 +23,7 @@ const MimeType = Object.freeze({ JSON: 'application/json', TEXT: 'text/plain' })
 // Placeholders on the reserved example.com domain: no real account or address.
 const DEPLOYER = 'deployer@example.com'; // Session.getEffectiveUser().getEmail()
 const SHEET_URL = 'https://docs.google.com/spreadsheets/d/fake-sheet-id/edit';
+const MAX_BODY_BYTES = 200 * 1024; // MailApp's email body limit on a personal (gmail.com) account
 
 class FakeSpreadsheet {
   constructor() {
@@ -330,6 +332,9 @@ class FakeMailApp {
     if (!message || typeof message.to !== 'string' || message.to === '' ||
       typeof message.subject !== 'string' || typeof message.body !== 'string') {
       throw new Error('Exception: Invalid argument: message');
+    }
+    if (Buffer.byteLength(message.body, 'utf8') > MAX_BODY_BYTES) {
+      throw new Error('Exception: The email body is too large (simulated: over 200 KB).');
     }
     this.sent.push({ to: message.to, subject: message.subject, body: message.body });
   }
