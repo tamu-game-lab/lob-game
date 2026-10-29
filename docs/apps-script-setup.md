@@ -1,18 +1,20 @@
 # Play-data Sheet setup (Google Apps Script)
 
-These steps connect the game to a Google Sheet in your TAMU Google account. The game sends play data to a small script attached to the Sheet (a Google Apps Script "web app"), and the script adds the rows to the Sheet. You do this once; it takes about 15 minutes.
+These steps connect the game to a Google Sheet in the Google account approved for the study. The game sends play data to a small script attached to the Sheet (a Google Apps Script "web app"), and the script adds the rows to the Sheet. You do this once; it takes about 15 minutes.
+
+**Where things stand.** TAMU's Google accounts do not allow a web app that anyone can open without signing in, and the game needs one (see "Why a personal Google account" near the end). So the Sheet, `LOB Game play data`, and its script live in your personal Google account, which you have confirmed is approved for this study. In these steps, "the study account" means that account. The web app running now is receiver 1.0.1, set up and checked with Parts 1 to 4. To move it to 1.1.0, which adds the session emails, don't repeat those parts: follow Part 7 from step 26. The `/exec` URL stays the same, so the game needs no change.
 
 You need:
-- your TAMU Google account;
-- two files from the lob-game-site repository: `apps-script/Code.gs` and `apps-script/appsscript.json`.
+- the study account (your personal Google account);
+- two files from this repository: `apps-script/Code.gs` and `apps-script/appsscript.json`.
 
-Where the data is stored has to match your IRB approval. These steps keep everything in one Google Sheet in your TAMU account. If TAMU's settings get in the way, read "If TAMU blocks 'Anyone' access" near the end before trying anything else.
+Where the data is stored has to match your IRB approval. These steps keep everything in one Google Sheet in the study account. If you ever set this up again in another account and Google's settings get in the way, read "Why a personal Google account" near the end before trying anything else.
 
 ## Part 1: Create the Sheet
 
-1. Go to sheets.google.com. Check the round account picture in the top-right corner: it must be your TAMU account. If it is not, click it and switch accounts.
+1. Go to sheets.google.com. Check the round account picture in the top-right corner: it must be the study account, not your TAMU account. If it is not, click it and switch accounts.
 2. Click **Blank spreadsheet**.
-3. Click **Untitled spreadsheet** (top left) and name it, for example `LOB Game play data`.
+3. Click **Untitled spreadsheet** (top left) and name it `LOB Game play data`, the name the live Sheet has.
 4. At the bottom of the page, right-click the tab **Sheet1**, choose **Rename**, type `codes` and press Enter.
 5. In the codes tab, type `code` in cell A1 and `active` in cell B1, exactly like that (lower case).
 6. Recommended: click the column letter **A** to select the whole column, then choose **Format > Number > Plain text**. This stops Sheets from turning a code such as `MAR1` into a date.
@@ -36,12 +38,12 @@ Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `eve
 16. Next to **Select type**, click the gear icon and choose **Web app**.
 17. Fill in the form:
     - **Description**: `v1`
-    - **Execute as**: **Me** (your TAMU address)
+    - **Execute as**: **Me** (the study account)
     - **Who has access**: **Anyone**
 
-    If **Anyone** is not in the list, stop here and read "If TAMU blocks 'Anyone' access" below.
+    If **Anyone** is not in the list, stop here and read "Why a personal Google account" below.
 18. Click **Deploy**.
-19. Google asks you to authorize the script. Click **Authorize access** and choose your TAMU account.
+19. Google asks you to authorize the script. Click **Authorize access** and choose the study account.
     - If you see "Google hasn't verified this app", click **Advanced**, then **Go to LOB play data receiver (unsafe)**. The warning appears because you made the script yourself instead of installing it from Google.
     - If the next screen has checkboxes, tick all of them (or **Select all**). Then click **Allow**.
 
@@ -58,10 +60,10 @@ Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `eve
 
     `{"ok":true,"schema":1,"script":"lob-receiver 1.1.0 (2026-10-29)","time":"2026-10-29T19:05:13Z"}`
 
-    If you see `"ok":false` or an error page, go over steps 8 to 18 again.
+    The web app running now shows `lob-receiver 1.0.1 (2026-10-28)` there until you upgrade it in Part 7. If you see `"ok":false` or an error page, go over steps 8 to 18 again.
 22. Open a private window (**Ctrl+Shift+N** in Chrome or Edge), where you are not signed in to Google, and open the same `?op=health` address there. You must see the same `"ok":true` line, because the game's players are not signed in either.
     - If Google asks you to sign in and your URL contains `/a/macros/tamu.edu/` (or `/a/tamu.edu/macros/`), try the shorter form without that part: `https://script.google.com/macros/s/<the same long ID>/exec?op=health`. If the shorter form shows the `"ok":true` line, use the shorter form from now on, including in the game.
-    - If it still asks you to sign in, the web app is not open to "Anyone" and the game's data will not arrive. Read "If TAMU blocks 'Anyone' access".
+    - If it still asks you to sign in, the web app is not open to "Anyone" and the game's data will not arrive. Read "Why a personal Google account".
 23. Check a study code: open the URL with `?op=code&code=P042` at the end, putting one of your codes in place of P042. You should see `{"ok":true,"known":true}`. A code that is not in the codes tab, or whose active cell is FALSE, shows `{"ok":true,"known":false}`. A new code can take up to a minute to show up.
 
 ## Part 5: Load test (optional)
@@ -80,7 +82,7 @@ It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same mom
 
 ## Part 6: Connect the game
 
-24. Put the `/exec` URL into the game's config asset: **PlaytestConfig**, field **Endpoint**. *(Placeholder: the game team will confirm the exact asset and field name.)* If you are not editing the game yourself, send the URL to the game team.
+24. Put the `/exec` URL into the game's config asset: **PlaytestConfig**, field **Endpoint**. If you are not editing the game yourself, send the URL to the game team.
 25. After the next game build, play once using the normal link (tryout mode). Within a minute or two, new `tryout_` tabs appear in the Sheet.
 
 ## Part 7: Session emails
@@ -97,9 +99,11 @@ From version 1.1.0 the script can email you when a player presses **Finish sessi
 
 A value the script cannot use (a typo, say) counts as `off` (for `digest_minutes`, as 60), and the health check lists its key under `ignored_settings`.
 
-26. If your web app already runs an earlier version (the `script` value of the health check in step 21 shows `lob-receiver 1.0.1`), first put in the new files: replace **Code.gs** as in steps 10 and 11, and **appsscript.json** as in step 13, then click **Save project**. Don't deploy yet.
+Google lets a script in a personal account email at most 100 recipients a day, and each address in `email_to` counts once per email. One email per session for a class of 40 stays under that; an hourly digest sends at most 24 a day.
+
+26. If your web app runs an earlier version, as the live one does (the `script` value of the health check in step 21 shows `lob-receiver 1.0.1`), first put in the new files: replace **Code.gs** as in steps 10 and 11, and **appsscript.json** as in step 13, then click **Save project**. Don't deploy yet: the web app keeps running 1.0.1 until step 30.
 27. At the top of the script editor, open the list of functions (to the right of **Debug**), choose **setupSettings**, and click **Run**.
-28. If Google asks you to authorize the script (it does when the web app was set up with an earlier version, because 1.1.0 needs three more permissions), click **Review permissions** and choose your TAMU account. If you see "Google hasn't verified this app", click **Advanced**, then **Go to LOB play data receiver (unsafe)**, as in step 19. Tick every checkbox (or **Select all**), then click **Allow**. Google's wording for the new permissions may differ a little:
+28. If Google asks you to authorize the script (it does when the web app was set up with an earlier version, because 1.1.0 needs three more permissions), click **Review permissions** and choose the study account. If you see "Google hasn't verified this app", click **Advanced**, then **Go to LOB play data receiver (unsafe)**, as in step 19. Tick every checkbox (or **Select all**), then click **Allow**. Google's wording for the new permissions may differ a little:
     - **Send email as you**: for the session emails.
     - **Allow this application to run when you are not present**: for the digest timer (it manages the script's triggers).
     - **See your primary Google Account email address**: so the emails go to you.
@@ -111,11 +115,11 @@ A value the script cannot use (a typo, say) counts as `off` (for `digest_minutes
 **Digest emails during class.**
 
 33. Before class, set `email_mode` to `digest`. In the script editor, choose **installDigestTrigger** in the list of functions and click **Run**. This installs a timer that runs **sendDigest** every `digest_minutes` (every hour by default). To check it, click the clock icon **Triggers** in the left bar: there is one trigger, for `sendDigest`. Running **installDigestTrigger** again replaces the timer rather than adding a second one; do that after you change `digest_minutes`.
-34. During class, each hour in which sessions finish brings one email that lists them, one line per session. They wait in the `digest_queue` tab until then, and each email deletes the lines it listed. An hour in which no session finishes sends nothing.
+34. During class, each hour in which sessions finish brings one email that lists them, one line per session. They wait in the `digest_queue` tab until then, and each email deletes the lines it listed. An hour in which no session finishes sends nothing. One email lists at most 200 sessions; any more wait for the next one.
 35. After class, choose **sendDigest** and click **Run** to send what is still waiting, then choose **removeDigestTrigger** and click **Run**. Set `email_mode` back to `off` or `session`.
 
 Good to know:
-- A post that the game sends twice (a retry) never sends a second email or adds a second line.
+- A post that the game sends again (a retry) sends no second email and adds no second line. The rare exception is a copy that arrives more than six hours later: like its rows, it is taken as new.
 - If an email cannot be sent (for example, after Google's daily email limit), the play data is still stored. The failure shows under **Executions** with no play data in it, and in digest mode the lines stay in `digest_queue` for the next run.
 - The link in the emails opens the Sheet only for accounts it is shared with.
 - After any change to the code, deploy a new version: **Deploy > Manage deployments**, **Edit**, **New version**, **Deploy** (step 30, and "Updating the script later" below). The `/exec` URL stays the same. A change in the `settings` tab needs no deployment.
@@ -163,23 +167,26 @@ To confirm the update, open the `?op=health` address again: the `script` value s
 - For analysis, work on a copy (**File > Make a copy**) or a download (**File > Download**) rather than in the data tabs.
 - The script never writes the data into its logs. **Executions** (in the script editor's left bar) shows only counts and error types.
 
-## If TAMU blocks "Anyone" access
+## Why a personal Google account
 
 > **Read this if** **Anyone** is missing from **Who has access** (step 17), if the private-window test (step 22) keeps asking you to sign in, or if Google says the app is blocked when you authorize it (step 19).
 
-TAMU's Google Workspace administrators can limit Apps Script web apps to people signed in with a TAMU account (the option then reads "Anyone within Texas A&M University"). The game sends its data anonymously: players never sign in to Google. So the web app has to be set to **Anyone**. With "Anyone within Texas A&M University", "Anyone with Google account" or "Only myself", the game's data will not arrive.
+The game sends its data anonymously: players never sign in to Google. So the web app has to be set to **Anyone**. With "Anyone within Texas A&M University", "Anyone with Google account" or "Only myself", the game's data will not arrive.
 
-If **Anyone** is not available:
+TAMU's Google accounts block web apps that anyone can open anonymously, so a TAMU account cannot run this web app. (A Google Workspace's administrators can limit web apps to people signed in to it; the option then reads, for example, "Anyone within Texas A&M University".) That is why the Sheet and its script live in your personal Google account, which you have confirmed is approved for this study: option 3 below.
 
-1. Don't pick one of the other options, and don't set up a different service or account to collect the data instead.
-2. Ask TAMU IT whether **Anyone** access can be allowed for this Apps Script web app on your account. Tell them it receives anonymous research play data into a Google Sheet in your TAMU account.
-3. Or use a different Google account that your IRB approval allows (for example, a lab or project account named in the protocol), and do every step of this guide in that account.
+If **Anyone** is not available in an account you set this up in:
+
+1. Don't pick one of the other options, and don't move the data to another service or to an account the study is not approved for.
+2. Ask the account's administrators (for a TAMU account, TAMU IT) whether **Anyone** access can be allowed for this Apps Script web app. Tell them it receives anonymous research play data into a Google Sheet in that account.
+3. Or use a different Google account that your IRB approval allows, and do every step of this guide in that account.
 
 Whichever way you go, the place where the data is stored has to match your IRB approval. If you are not sure an account is covered, check with the IRB first.
 
 ## For the game team
 
 - Offline tests (Node.js only, no packages): `node apps-script/test/run-tests.js`
+- The live web app runs in the study lead's personal Google account, not a TAMU one (see "Where things stand"). It runs receiver 1.0.1 until the Part 7 upgrade; `?op=health` shows which version is live.
 - Bump `SCRIPT_VERSION` in `Code.gs` with every change; `?op=health` shows it.
 - `setupSettings`, `installDigestTrigger`, `removeDigestTrigger` and `sendDigest` are run from the script editor (or, for `sendDigest`, by its trigger), never through the web app.
 - Contract: `docs/data-dictionary.md` (schema 1).
