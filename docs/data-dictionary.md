@@ -17,7 +17,7 @@ Rules:
   - validates each post;
   - ignores a batch id it has already appended, so retries never duplicate rows;
   - takes a lock and appends rows to the tab for their kind and mode, by header name;
-  - adds a column when a new field arrives;
+  - adds a column when a new field arrives, up to 60 columns a tab (a post that would add more is refused whole, without retry);
   - stamps `server_time`.
 
 ### Post body
@@ -74,6 +74,8 @@ At most 100 rows and 200 KB per post.
 | client_time | text (ISO 8601 UTC) | `2026-10-28T19:04:58Z` | When the game made the row. |
 | server_time | text (ISO 8601 UTC) | `2026-10-28T19:05:13Z` | Added by the server on append. |
 | target_tab | text | `progress` | Only on `unmatched` rows: the tab the row would have gone to. |
+
+The game repeats the five post fields (`schema`, `mode`, `build`, `code`, `session`) on each row; the server checks that they match the post (`code` compared upper-case; a mismatch rejects the post) and stores the post's values.
 
 ## 5. sessions (kind = `session`)
 | Field | Type | Values | Meaning |

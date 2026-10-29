@@ -22,6 +22,9 @@ const CLIENT_TIME = '2026-10-28T19:04:58Z';
 const ISO_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const COMMON = ['kind', 'schema', 'mode', 'build', 'code', 'session', 'row_seq', 'client_time', 'server_time'];
 const MAX_BODY_BYTES = 200 * 1024;
+// A real post from the game's client (PlaytestSession and PlaytestPayload), one row of each kind.
+const CLIENT_POST = fs.readFileSync(path.join(__dirname, 'fixtures', 'client_post_w1.json'), 'utf8');
+const OTHER_SESSION = '0b7e3c1d-2f4a-4e6b-9c8d-7a1f2e3d4c5b';
 
 // ------------------------------------------------------------------ helpers
 
@@ -134,10 +137,76 @@ function codeReads(env) {
   return env.spreadsheet.reads.filter(r => r.sheet === 'codes').length;
 }
 
+/**
+ * Runs fn and returns the Spreadsheet, Sheet and Range methods the script called, as
+ * "<tab> <method>". The script reaches the Sheet only through getActiveSpreadsheet(), so
+ * its calls go through these proxies; the fakes' own internal calls do not.
+ */
+function sheetsCalls(env, fn) {
+  const calls = [];
+  const spy = (target, tabOf) => new Proxy(target, {
+    get(object, key) {
+      const value = object[key];
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        calls.push(tabOf(object, args) + ' ' + String(key));
+        const result = value.apply(object, args);
+        if (result && typeof result.getMaxRows === 'function') return spy(result, sheet => sheet.getName());
+        if (result && typeof result.setValues === 'function') return spy(result, range => range.sheet.getName());
+        return result;
+      };
+    },
+  });
+  const app = env.globals.SpreadsheetApp;
+  const active = app.getActiveSpreadsheet;
+  app.getActiveSpreadsheet = () => spy(active(), (spreadsheet, args) => String(args[0]));
+  try {
+    fn();
+  } finally {
+    app.getActiveSpreadsheet = active;
+  }
+  return calls;
+}
+
 const tests = [];
 function test(name, fn) {
   tests.push({ name: name, fn: fn });
 }
+
+// ------------------------------------------------------------------ the game's own post (contract)
+
+test('the game\'s post (fixtures/client_post_w1.json), as is, adds one row to each test tab with the post\'s values', () => {
+  const env = makeEnv();
+  const game = JSON.parse(CLIENT_POST);
+  assert.deepStrictEqual(post(env, CLIENT_POST), { ok: true, appended: 4 });
+  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['test_sessions', 'test_progress', 'test_events', 'test_runs']);
+  env.spreadsheet.sheetNames().forEach((name, i) => {
+    const sheet = tab(env, name);
+    const own = Object.keys(game.rows[i]).filter(field => COMMON.indexOf(field) < 0);
+    assert.deepStrictEqual(sheet.header(), COMMON.concat(own), name + ': the five post fields are not added twice');
+    const records = sheet.records();
+    assert.strictEqual(records.length, 1, name);
+    const r = records[0];
+    assert.deepStrictEqual([r.schema, r.mode, r.build, r.code, r.session], [game.schema, game.mode, game.build, game.code, game.session], name);
+    assert.deepStrictEqual([r.kind, r.row_seq], [game.rows[i].kind, game.rows[i].row_seq], name);
+  });
+});
+
+test('reposting the game\'s post is a duplicate and adds no rows', () => {
+  const env = makeEnv();
+  post(env, CLIENT_POST);
+  assert.deepStrictEqual(post(env, CLIENT_POST), { ok: true, appended: 0, duplicate: true });
+  env.spreadsheet.sheetNames().forEach(name => assert.strictEqual(tab(env, name).records().length, 1, name));
+});
+
+test('a copy of the game\'s post whose row mode differs from the post is rejected with retry:false; nothing is appended', () => {
+  const env = makeEnv();
+  const copy = JSON.parse(CLIENT_POST);
+  copy.rows[1].mode = 'tryout';
+  assert.deepStrictEqual(post(env, copy), { ok: false, error: 'row disagrees with post (row 2, mode)', retry: false });
+  assert.strictEqual(env.spreadsheet.sheets.length, 0);
+  assert.strictEqual(env.locks.waits.length, 0);
+});
 
 // ------------------------------------------------------------------ appending
 
@@ -182,6 +251,17 @@ test('the post-level fields are copied onto every row', () => {
   records.forEach(r => {
     assert.deepStrictEqual([r.schema, r.mode, r.build, r.code, r.session], [1, 'tryout', 'W1 2026-10-28', 'P042', SESSION]);
   });
+});
+
+test('a row may repeat the post fields: code is compared upper-case, and the stored values are the post\'s', () => {
+  const env = makeEnv();
+  const same = { schema: 1, mode: 'tryout', build: 'W1 2026-10-28', session: SESSION };
+  const repeat = code => progressRow(Object.assign({ code: code }, same));
+  assert.deepStrictEqual(post(env, body({ code: 'P042', rows: [repeat('p042')] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ code: 'p042', rows: [repeat('P042')] })), { ok: true, appended: 1 });
+  const sheet = tab(env, 'tryout_progress');
+  assert.deepStrictEqual(sheet.header(), COMMON.concat(['node', 'action', 'seconds']));
+  assert.deepStrictEqual(sheet.records().map(r => r.code), ['P042', 'P042']);
 });
 
 test('a new field adds a column on the right', () => {
@@ -285,12 +365,59 @@ test('limits are inclusive: 1000-char text, 4000-char detail, 40-char field name
   const env = makeEnv();
   const rows = [progressRow({ node: 'x'.repeat(1000), ['a'.repeat(40)]: 1 }), eventRow({ detail: 'x'.repeat(4000) })];
   assert.deepStrictEqual(post(env, body({ rows: rows })), { ok: true, appended: 2 });
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('g', 58))] })), { ok: true, appended: 1 });
+  // 64 names over two tabs, so that neither tab passes the 60-column cap.
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('g', 29)), eventRow(fields('h', 24))] })), { ok: true, appended: 2 });
 });
 
 test('a body of exactly 200 KB (204800 bytes) is accepted', () => {
   const env = makeEnv();
   assert.deepStrictEqual(post(env, sizedBody(MAX_BODY_BYTES)), { ok: true, appended: 52 });
+});
+
+// ------------------------------------------------------------------ column cap
+
+test('a tab grows to exactly 60 columns', () => {
+  const env = makeEnv();
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('f', 48))] })), { ok: true, appended: 1 });
+  assert.strictEqual(tab(env, 'tryout_progress').header().length, 60);
+});
+
+test('a post that would grow a tab past 60 columns is rejected whole, naming the new fields; nothing is appended', () => {
+  const env = makeEnv();
+  post(env, body({ rows: [progressRow(fields('f', 45))] })); // 57 columns
+  const sheet = tab(env, 'tryout_progress');
+  const header = sheet.header();
+  const writes = env.spreadsheet.writes.length;
+  const reply = post(env, body({ rows: [sessionRow(), progressRow(fields('g', 4))] })); // 61 columns
+  assert.deepStrictEqual(reply, { ok: false, error: 'too many columns (tryout_progress, new fields: g1, g2, g3, g4)', retry: false });
+  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['tryout_progress'], 'the sessions row is not appended either');
+  assert.deepStrictEqual(sheet.header(), header);
+  assert.strictEqual(sheet.records().length, 1);
+  assert.strictEqual(env.spreadsheet.writes.length, writes);
+  assert.strictEqual(env.cache.puts.length, 1, 'the rejected batch is not remembered');
+  assert.strictEqual(env.locks.held, false);
+  assert.strictEqual(env.logs[env.logs.length - 1], 'warn: rejected: too many columns', 'the log has no field names');
+});
+
+test('a tab already over 60 columns takes rows that add no column, but no new column', () => {
+  const env = makeEnv();
+  const wide = COMMON.concat(['node', 'action', 'seconds'], Object.keys(fields('x', 50))); // 62 columns, made by hand
+  const sheet = env.spreadsheet.insertSheet('tryout_progress');
+  sheet.insertColumnsAfter(26, wide.length - 26);
+  sheet.getRange(1, 1, 1, wide.length).setValues([wide]);
+  assert.deepStrictEqual(post(env, body()), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow({ attempts: 2 })] })),
+    { ok: false, error: 'too many columns (tryout_progress, new fields: attempts)', retry: false });
+  assert.strictEqual(sheet.records().length, 1);
+});
+
+test('a new tab that would need more than 60 columns is not made', () => {
+  const env = makeEnv();
+  const reply = post(env, body({ rows: [progressRow(fields('f', 49))] })); // 61 columns
+  assert.deepStrictEqual([reply.ok, reply.retry], [false, false]);
+  assert.ok(reply.error.startsWith('too many columns (tryout_progress, new fields: kind, schema, mode, '), reply.error);
+  assert.ok(reply.error.endsWith(', f48, f49)'), reply.error);
+  assert.strictEqual(env.spreadsheet.sheets.length, 0);
 });
 
 // ------------------------------------------------------------------ duplicates
@@ -468,8 +595,13 @@ const INVALID = [
   ['a non-finite number', () => JSON.stringify(body()).replace('"seconds":142', '"seconds":1e400'), 'bad value'],
   ['text over 1000 characters', () => body({ rows: [progressRow({ node: 'x'.repeat(1001) })] }), 'value too long'],
   ['a detail over 4000 characters', () => body({ rows: [eventRow({ detail: 'x'.repeat(4001) })] }), 'value too long'],
-  ['a row carrying session', () => body({ rows: [progressRow({ session: SESSION })] }), 'reserved field'],
-  ['a row carrying code', () => body({ rows: [progressRow({ code: 'P042' })] }), 'reserved field'],
+  ['a row whose session differs from the post', () => body({ rows: [progressRow({ session: OTHER_SESSION })] }), 'row disagrees with post (row 1, session)'],
+  ['a row whose code differs from the post', () => body({ rows: [progressRow({ code: 'P043' })] }), 'row disagrees with post (row 1, code)'],
+  ['a row whose schema differs from the post', () => body({ rows: [progressRow({ schema: 2 })] }), 'row disagrees with post (row 1, schema)'],
+  ['a row whose schema is text', () => body({ rows: [progressRow({ schema: '1' })] }), 'row disagrees with post (row 1, schema)'],
+  ['a row whose mode differs from the post', () => body({ rows: [progressRow(), progressRow({ mode: 'study' })] }), 'row disagrees with post (row 2, mode)'],
+  ['a row whose build differs from the post', () => body({ rows: [progressRow({ build: 'W1 2026-10-27' })] }), 'row disagrees with post (row 1, build)'],
+  ['a row code with a letter outside A-Z that upper-cases to the post\'s code', () => body({ code: 'S42', rows: [progressRow({ code: '\u017f42' })] }), 'row disagrees with post (row 1, code)'],
   ['a row carrying server_time', () => body({ rows: [progressRow({ server_time: CLIENT_TIME })] }), 'reserved field'],
   ['a row carrying target_tab', () => body({ rows: [progressRow({ target_tab: 'progress' })] }), 'reserved field'],
   ['more than 64 distinct fields', () => body({ rows: [progressRow(fields('a', 31)), progressRow(fields('b', 31))] }), 'too many fields'],
@@ -524,6 +656,28 @@ test('every lock taken is released', () => {
   post(env, body({ mode: 'test' }));
   assert.strictEqual(env.locks.held, false);
   assert.strictEqual(env.locks.releases, env.locks.waits.length);
+});
+
+test('the writes are flushed before the lock is released', () => {
+  const env = makeEnv();
+  const app = env.globals.SpreadsheetApp;
+  const flush = app.flush;
+  const seen = [];
+  app.flush = () => {
+    seen.push({ held: env.locks.held, writes: env.spreadsheet.writes.length });
+    flush();
+  };
+  post(env, body({ rows: [sessionRow(), progressRow()] }));
+  assert.deepStrictEqual(seen, [{ held: true, writes: env.spreadsheet.writes.length }]);
+});
+
+test('an append to existing tabs makes 8 Sheets calls a tab, every read before the first write', () => {
+  const env = makeEnv();
+  post(env, body({ rows: [progressRow(), eventRow()] }));
+  const calls = sheetsCalls(env, () => post(env, body({ rows: [progressRow(), eventRow()] })));
+  const reads = name => ['getSheetByName', 'getLastColumn', 'getRange', 'getValues', 'getLastRow', 'getMaxRows'].map(m => name + ' ' + m);
+  const write = name => ['getRange', 'setValues'].map(m => name + ' ' + m);
+  assert.deepStrictEqual(calls, reads('tryout_progress').concat(reads('tryout_events'), write('tryout_progress'), write('tryout_events')));
 });
 
 test('logs hold counts and error kinds, never payload contents', () => {
@@ -585,6 +739,47 @@ test('a script that is not bound to a sheet fails health, and posts ask the clie
   const env = makeEnv({ unbound: true });
   assert.deepStrictEqual(get(env, { op: 'health' }), { ok: false, error: 'not bound to a sheet' });
   assert.deepStrictEqual(post(env, body()), { ok: false, error: 'server', retry: true });
+});
+
+// ------------------------------------------------------------------ load-test.js (offline checks; it is never run here)
+
+const loadTest = require('./load-test');
+
+test('the load test refuses any URL but https://script.google.com/macros/s/<id>/exec', () => {
+  const exec = 'https://script.google.com/macros/s/AKfycbx-Q7_abc123/exec';
+  assert.strictEqual(loadTest.execUrl(exec), exec);
+  [
+    exec.replace('https:', 'http:'),
+    exec.replace('/exec', '/dev'),
+    exec + '?op=health',
+    exec + '/',
+    exec.replace('/macros/', '/a/macros/tamu.edu/'),
+    exec.replace('script.google.com', 'script.google.com.example.com'),
+    exec.replace('script.google.com', 'script.google.com@example.com'),
+    'https://example.com/?u=' + exec,
+    'https://script.google.com/macros/s//exec',
+    ' ' + exec,
+    '',
+    undefined,
+  ].forEach(url => assert.strictEqual(loadTest.execUrl(url), null, String(url)));
+});
+
+test('the load test sends test mode only, codes T900-T999, 20 rows like the game\'s, which the receiver accepts', () => {
+  const env = makeEnv();
+  [0, 99].forEach(index => {
+    const client = loadTest.makeClient(index);
+    assert.strictEqual(client.code, 'T' + (900 + index));
+    const posts = [loadTest.makePost(client), loadTest.makePost(client)];
+    assert.notStrictEqual(posts[0].batch, posts[1].batch);
+    posts.forEach(p => {
+      assert.strictEqual(p.mode, 'test');
+      assert.strictEqual(p.rows.length, 20);
+      p.rows.forEach(r => assert.deepStrictEqual([r.mode, r.code, r.session], ['test', client.code, client.session]));
+      assert.deepStrictEqual(post(env, p), { ok: true, appended: 20 });
+    });
+  });
+  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['test_sessions', 'test_progress', 'test_events', 'test_runs']);
+  assert.strictEqual(tab(env, 'test_runs').records().length, 20);
 });
 
 // ------------------------------------------------------------------ run

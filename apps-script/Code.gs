@@ -4,8 +4,8 @@
  * Contract: docs/data-dictionary.md, schema 1. The game posts batches of rows as
  * text/plain JSON. doPost validates a post, appends its rows to the tab for their mode
  * and kind (columns matched by header name; a new field gets a new column on the
- * right), stamps server_time, and replies with a small JSON object. doGet answers
- * ?op=health and ?op=code.
+ * right, up to MAX_COLUMNS a tab), stamps server_time, and replies with a small JSON
+ * object. doGet answers ?op=health and ?op=code.
  *
  * Bound script: create it from the Google Sheet (Extensions > Apps Script), so that
  * SpreadsheetApp.getActiveSpreadsheet() is that Sheet. Steps: docs/apps-script-setup.md.
@@ -22,7 +22,7 @@
  * Offline tests: node apps-script/test/run-tests.js
  */
 
-const SCRIPT_VERSION = 'lob-receiver 1.0.0 (2026-10-28)';
+const SCRIPT_VERSION = 'lob-receiver 1.0.1 (2026-10-28)';
 const SCHEMA = 1;
 
 const MAX_BODY_BYTES = 200 * 1024; // "at most 200 KB per post", counted in UTF-8 bytes
@@ -32,6 +32,9 @@ const MAX_DETAIL = 4000; // "detail" holds a telemetry line's key/value pairs as
 // Distinct row field names in one post. The four kinds together use 30; the cap only
 // stops a malformed or hostile post from flooding a tab with columns.
 const MAX_FIELDS = 64;
+// A tab grows to at most this many columns; a post that would add columns past it is
+// rejected whole. The dictionary's widest tab, unmatched, has 40.
+const MAX_COLUMNS = 60;
 
 const LOCK_WAIT_MS = 20000;
 const BATCH_TTL_S = 21600; // 6 h, the CacheService maximum
@@ -43,8 +46,11 @@ const UNMATCHED_TAB = 'unmatched';
 const MODE_PREFIX = { study: '', tryout: 'tryout_', test: 'test_' };
 const KIND_TAB = { session: 'sessions', progress: 'progress', run: 'runs', event: 'events' };
 const BODY_FIELDS = ['schema', 'mode', 'build', 'code', 'session', 'batch', 'sent_at', 'rows'];
-// The server sets these on every row (post-level values and server stamps), so a row may not carry them.
-const RESERVED_ROW_FIELDS = ['schema', 'mode', 'build', 'code', 'session', 'server_time', 'target_tab'];
+// The game repeats these post fields on every row. A row's copy must equal the post's
+// value (code after the same normalization); the post's value is the one stored.
+const POST_ROW_FIELDS = ['schema', 'mode', 'build', 'code', 'session'];
+// The server stamps these on rows, so a row may not carry them.
+const RESERVED_ROW_FIELDS = ['server_time', 'target_tab'];
 
 const CODE_RE = /^[A-Za-z]{1,3}[0-9]{1,4}$/;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -62,12 +68,12 @@ function doPost(e) {
     post = readPost_(e);
   } catch (err) {
     if (!err || !err.invalid) return serverError_('validate', err);
-    console.warn('rejected: ' + err.reason);
-    return reply_({ ok: false, error: err.message, retry: false });
+    return rejected_(err);
   }
   try {
     return storePost_(post);
   } catch (err) {
+    if (err && err.invalid) return rejected_(err); // the column cap, checked under the lock
     return serverError_('store', err);
   }
 }
@@ -109,30 +115,35 @@ function readPost_(e) {
   if (body.schema !== SCHEMA) throw invalid_('unknown schema');
   if (typeof body.mode !== 'string' || !own_(MODE_PREFIX, body.mode)) throw invalid_('bad mode');
   if (!isText_(body.build)) throw invalid_('bad build');
-  // Checked before upper-casing, so letters outside A-Z can never turn into a valid code.
-  if (typeof body.code !== 'string' || !CODE_RE.test(body.code)) throw invalid_('bad code');
+  const code = normalCode_(body.code);
+  if (code === null) throw invalid_('bad code');
   if (typeof body.session !== 'string' || !UUID_RE.test(body.session)) throw invalid_('bad session');
   if (typeof body.batch !== 'string' || !UUID_RE.test(body.batch)) throw invalid_('bad batch');
   if (body.sent_at !== undefined && body.sent_at !== null && !isText_(body.sent_at)) throw invalid_('bad sent_at');
   const rows = body.rows;
   if (!Array.isArray(rows) || rows.length === 0) throw invalid_('no rows');
   if (rows.length > MAX_ROWS) throw invalid_('too many rows');
-  const names = new Set();
-  rows.forEach((row, i) => checkRow_(row, 'row ' + (i + 1), names));
-  if (names.size > MAX_FIELDS) throw invalid_('too many fields');
-  return {
+  const post = {
     schema: body.schema,
     mode: body.mode,
     build: body.build,
-    code: body.code.toUpperCase(),
+    code: code,
     session: body.session,
     batch: body.batch,
     rows: rows,
   };
+  const names = new Set();
+  rows.forEach((row, i) => checkRow_(row, 'row ' + (i + 1), post, names));
+  if (names.size > MAX_FIELDS) throw invalid_('too many fields');
+  return post;
 }
 
-/** Validates one row: kind, row_seq, client_time, then every field name and value. */
-function checkRow_(row, where, names) {
+/**
+ * Validates one row: kind, row_seq, client_time, then every field name and value. A
+ * row may repeat the post's schema, mode, build, code and session, each equal to the
+ * post's value; its code is compared after the post code's normalization.
+ */
+function checkRow_(row, where, post, names) {
   if (!isObject_(row)) throw invalid_('row is not an object', where);
   if (typeof row.kind !== 'string' || !own_(KIND_TAB, row.kind)) throw invalid_('bad kind', where);
   if (!Number.isSafeInteger(row.row_seq) || row.row_seq < 1) throw invalid_('bad row_seq', where);
@@ -140,6 +151,10 @@ function checkRow_(row, where, names) {
   Object.keys(row).forEach(name => {
     if (!FIELD_RE.test(name)) throw invalid_('bad field name', where);
     if (RESERVED_ROW_FIELDS.indexOf(name) >= 0) throw invalid_('reserved field', where + ', ' + name);
+    if (POST_ROW_FIELDS.indexOf(name) >= 0) {
+      const value = name === 'code' ? normalCode_(row[name]) : row[name];
+      if (value !== post[name]) throw invalid_('row disagrees with post', where + ', ' + name);
+    }
     checkValue_(row[name], name, where);
     names.add(name);
   });
@@ -156,7 +171,19 @@ function checkValue_(value, name, where) {
   throw invalid_('bad value', where + ', ' + name);
 }
 
-/** Appends a validated post under the script lock, unless its batch was already appended. */
+/**
+ * A study code upper-cased, or null when it is not 1-3 letters then 1-4 digits. It is
+ * checked before upper-casing, so letters outside A-Z can never turn into a valid code.
+ */
+function normalCode_(value) {
+  return typeof value === 'string' && CODE_RE.test(value) ? value.toUpperCase() : null;
+}
+
+/**
+ * Appends a validated post under the script lock, unless its batch was already appended.
+ * Every tab is read and checked before any is written, so a post over the column cap is
+ * rejected whole, and the writes go out together.
+ */
 function storePost_(post) {
   const batchKey = 'batch:' + post.batch.toLowerCase();
   if (cacheGet_(batchKey) !== null) return duplicate_();
@@ -176,11 +203,13 @@ function storePost_(post) {
   try {
     // A copy of this batch may have been appended while this request waited for the lock.
     if (cacheGet_(batchKey) !== null) return duplicate_();
-    const tabs = groupRows_(post, matched, isoNow_());
-    tabs.forEach((rows, tabName) => appendRows_(ss, tabName, rows));
-    SpreadsheetApp.flush(); // commit the writes before the next request can take the lock
+    const plans = [];
+    groupRows_(post, matched, isoNow_()).forEach((rows, tabName) => plans.push(planTab_(ss, tabName, rows)));
+    plans.forEach(plan => writeTab_(ss, plan));
+    // Keep this flush: the next post, under the lock, must see this post's committed last row, or it would overwrite it.
+    SpreadsheetApp.flush();
     cachePut_(batchKey, '1', BATCH_TTL_S);
-    tabCount = tabs.size;
+    tabCount = plans.length;
   } finally {
     lock.releaseLock();
   }
@@ -193,7 +222,8 @@ function storePost_(post) {
  * fields (kind, the post-level values copied from the body, row_seq, client_time,
  * server_time), then its own fields in arrival order; a new tab's header follows this
  * order. Unmatched study rows go to the unmatched tab, with target_tab naming the tab
- * they would have gone to.
+ * they would have gone to. A row's own copy of a post-level value is dropped: the
+ * stored value is the post's.
  */
 function groupRows_(post, matched, serverTime) {
   const tabs = new Map();
@@ -222,15 +252,16 @@ function groupRows_(post, matched, serverTime) {
 }
 
 /**
- * Appends rows (objects keyed by field name) to one tab with a single setValues call.
- * Columns are matched by header name; a new field first gets a header cell on the
- * right. A missing or empty tab gets a header row in the rows' field order, which
- * groupRows_ makes the common fields first, then the others in arrival order.
+ * Reads one tab and lays out rows (objects keyed by field name) for it, writing nothing.
+ * Columns are matched by header name, and a new field gets a column on the right; a
+ * missing or empty tab gets a header in the rows' field order, which groupRows_ makes
+ * the common fields first, then the others in arrival order. A tab grows to at most
+ * MAX_COLUMNS columns: a post that would add columns past that is invalid, and the error
+ * names the new fields.
  */
-function appendRows_(ss, tabName, rows) {
-  const sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
+function planTab_(ss, tabName, rows) {
+  const sheet = ss.getSheetByName(tabName); // null: writeTab_ makes the tab
+  const lastCol = sheet ? sheet.getLastColumn() : 0;
   const existing = lastCol > 0
     ? sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim())
     : [];
@@ -245,27 +276,48 @@ function appendRows_(ss, tabName, rows) {
       header.push(name);
     }
   }));
-
-  const width = header.length;
-  const maxCols = sheet.getMaxColumns();
-  if (width > maxCols) sheet.insertColumnsAfter(maxCols, width - maxCols);
-  if (width > existing.length) {
-    sheet.getRange(1, existing.length + 1, 1, width - existing.length)
-      .setValues([header.slice(existing.length).map(toCell_)]);
+  const added = header.slice(existing.length);
+  if (added.length > 0 && header.length > MAX_COLUMNS) {
+    throw invalid_('too many columns', tabName + ', new fields: ' + added.join(', '));
   }
+  return {
+    tabName: tabName,
+    sheet: sheet,
+    lastRow: sheet ? sheet.getLastRow() : 0,
+    maxRows: sheet ? sheet.getMaxRows() : 0,
+    maxCols: sheet && added.length > 0 ? sheet.getMaxColumns() : 0, // only needed when the header grows
+    oldWidth: existing.length,
+    header: header,
+    values: rows.map(row => {
+      const line = new Array(header.length).fill('');
+      Object.keys(row).forEach(name => {
+        line[column.get(name)] = toCell_(row[name]);
+      });
+      return line;
+    }),
+  };
+}
 
-  const first = Math.max(lastRow, 1) + 1; // row 1 is the header
-  const last = first + rows.length - 1;
-  const maxRows = sheet.getMaxRows();
+/** Writes a planned tab: makes it if missing, grows it as needed, adds the new header cells, then the rows in one call. */
+function writeTab_(ss, plan) {
+  let sheet = plan.sheet;
+  let maxRows = plan.maxRows;
+  let maxCols = plan.maxCols;
+  if (!sheet) {
+    sheet = ss.insertSheet(plan.tabName);
+    maxRows = sheet.getMaxRows();
+    maxCols = sheet.getMaxColumns();
+  }
+  const width = plan.header.length;
+  if (width > plan.oldWidth) {
+    if (width > maxCols) sheet.insertColumnsAfter(maxCols, width - maxCols);
+    sheet.getRange(1, plan.oldWidth + 1, 1, width - plan.oldWidth)
+      .setValues([plan.header.slice(plan.oldWidth).map(toCell_)]);
+  }
+  const first = Math.max(plan.lastRow, 1) + 1; // row 1 is the header
+  const last = first + plan.values.length - 1;
   if (last > maxRows) sheet.insertRowsAfter(maxRows, Math.max(last - maxRows, ROW_CHUNK));
-  const values = rows.map(row => {
-    const line = new Array(width).fill('');
-    Object.keys(row).forEach(name => {
-      line[column.get(name)] = toCell_(row[name]);
-    });
-    return line;
-  });
-  sheet.getRange(first, 1, rows.length, width).setValues(values);
+  sheet.getRange(first, 1, plan.values.length, width).setValues(plan.values);
 }
 
 /** The active study codes, upper-case, cached for CODES_TTL_S seconds. */
@@ -351,6 +403,12 @@ function spreadsheet_() {
 
 function reply_(body) {
   return ContentService.createTextOutput(JSON.stringify(body)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/** An invalid post: the client does not send it again. The log shows the reason only. */
+function rejected_(err) {
+  console.warn('rejected: ' + err.reason);
+  return reply_({ ok: false, error: err.message, retry: false });
 }
 
 /**

@@ -56,7 +56,7 @@ Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `eve
 
     You should see one line like:
 
-    `{"ok":true,"schema":1,"script":"lob-receiver 1.0.0 (2026-10-28)","time":"2026-10-28T19:05:13Z"}`
+    `{"ok":true,"schema":1,"script":"lob-receiver 1.0.1 (2026-10-28)","time":"2026-10-28T19:05:13Z"}`
 
     If you see `"ok":false` or an error page, go over steps 8 to 18 again.
 22. Open a private window (**Ctrl+Shift+N** in Chrome or Edge), where you are not signed in to Google, and open the same `?op=health` address there. You must see the same `"ok":true` line, because the game's players are not signed in either.
@@ -64,7 +64,21 @@ Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `eve
     - If it still asks you to sign in, the web app is not open to "Anyone" and the game's data will not arrive. Read "If TAMU blocks 'Anyone' access".
 23. Check a study code: open the URL with `?op=code&code=P042` at the end, putting one of your codes in place of P042. You should see `{"ok":true,"known":true}`. A code that is not in the codes tab, or whose active cell is FALSE, shows `{"ok":true,"known":false}`. A new code can take up to a minute to show up.
 
-## Part 5: Connect the game
+## Part 5: Load test (optional)
+
+This checks that the web app keeps up when a class of 40 finishes a run at the same moment. It needs Node.js 18 or later and a copy of this repository, so the game team may run it for you. Run it after Part 4 works, and when nobody is playing.
+
+In a terminal in the repository folder, run it with your `/exec` URL from step 20, in the short form (it refuses any other address):
+
+```
+node apps-script/test/load-test.js https://script.google.com/macros/s/AKfy...xyz/exec
+```
+
+It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same moment in each round. It sends test data only (codes T900 to T999), so its rows go to the `test_` tabs, which you may delete afterwards. A good result:
+- `failures: 0`;
+- a `p95` under 8 seconds, how long the game waits for its last post when a player presses Finish session.
+
+## Part 6: Connect the game
 
 24. Put the `/exec` URL into the game's config asset: **PlaytestConfig**, field **Endpoint**. *(Placeholder: the game team will confirm the exact asset and field name.)* If you are not editing the game yourself, send the URL to the game team.
 25. After the next game build, play once using the normal link (tryout mode). Within a minute or two, new `tryout_` tabs appear in the Sheet.
