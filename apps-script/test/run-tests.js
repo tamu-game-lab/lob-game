@@ -896,6 +896,22 @@ test('a mail failure is logged without the address and the post still succeeds; 
   assert.ok(!env.logs.join('\n').includes('@'), 'no address in the logs');
 });
 
+test('a settings read that fails after the rows are stored is logged, and the post still succeeds', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'session' });
+  const app = env.globals.SpreadsheetApp;
+  const flush = app.flush;
+  app.flush = () => {
+    flush();
+    env.spreadsheet.failOn = 'getSheetByName'; // its next call is the settings read, once the lock is released
+  };
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.strictEqual(tab(env, 'tryout_sessions').records().length, 1);
+  assert.strictEqual(env.mail.sent.length, 0);
+  assert.ok(env.logs[env.logs.length - 1].startsWith('error: email failed (settings): Error: Exception: Service Spreadsheets failed'));
+  assert.strictEqual(env.locks.held, false);
+});
+
 test('digest failures never fail a post or lose a line: a queue lock timeout is logged, and a failed digest keeps its lines', () => {
   const env = makeEnv();
   emailSettings(env, { email_mode: 'digest' });
@@ -1031,6 +1047,26 @@ test('an email holds no client text: the build keeps label characters only, and 
   assert.strictEqual(build('W2.1 1.2.1-W2.1'), 'Build: W2.1 1.2.1-W2.1');
   assert.strictEqual(build('Sign in at www.lob-verify.com.'), 'Build: Sign in at www?lob-verify?com?');
   assert.strictEqual(build('.5 a..1 9.'), 'Build: ?5 a??1 9?');
+});
+
+test('appsscript.json keeps the web app settings and lists exactly the scopes of the services Code.gs calls', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'appsscript.json'), 'utf8'));
+  assert.strictEqual(manifest.runtimeVersion, 'V8');
+  assert.deepStrictEqual(manifest.webapp, { executeAs: 'USER_DEPLOYING', access: 'ANYONE_ANONYMOUS' });
+  // A manifest that lists oauthScopes turns off Apps Script's scope detection, so a call
+  // whose scope is missing fails only once deployed. Each call here needs the scope after it.
+  const scopes = new Map([
+    ['SpreadsheetApp.', 'https://www.googleapis.com/auth/spreadsheets'],
+    ['MailApp.sendEmail(', 'https://www.googleapis.com/auth/script.send_mail'],
+    ['ScriptApp.', 'https://www.googleapis.com/auth/script.scriptapp'],
+    ['Session.getEffectiveUser().getEmail()', 'https://www.googleapis.com/auth/userinfo.email'],
+  ]);
+  scopes.forEach((scope, call) => assert.ok(CODE.includes(call), 'Code.gs calls ' + call));
+  assert.deepStrictEqual(manifest.oauthScopes.slice().sort(), Array.from(scopes.values()).sort());
+  // Services that would need a scope the manifest does not list.
+  ['GmailApp', 'DriveApp', 'UrlFetchApp', 'DocumentApp', 'FormApp', 'CalendarApp', 'getUi('].forEach(name => {
+    assert.ok(!CODE.includes(name), 'Code.gs does not use ' + name);
+  });
 });
 
 // ------------------------------------------------------------------ load-test.js (offline checks; it is never run here)
