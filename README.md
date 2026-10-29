@@ -23,7 +23,9 @@ There is no game source code and no play data here. The Unity project is kept in
 Codes are pseudonymous: one to three letters and one to four digits, such as P042. The data holds no names, emails, student numbers or free text. See `docs/data-dictionary.md`.
 
 ## Releases
-| Build | Purpose |
-|---|---|
-| W1 | Tryouts: the study-code screen, the main screen and the data pipeline. |
-| W2 | Adds the concept map and the intro from the crews to the bar chart to the Line of Balance. |
+| Build | Version | Published | Purpose |
+|---|---|---|---|
+| W1 | 1.1-W1 | 2026-10-28 (replaced by W2) | Tryouts: the study-code screen, the main screen and the data pipeline. |
+| W2 | 1.2-W2 | 2026-10-28 (live) | Adds the concept map and the intro from the crews to the bar chart to the Line of Balance. |
+
+Play data is sent only once the study team's Apps Script address is set in a build (see `docs/apps-script-setup.md`). Until then the game keeps a player's rows for "Download my data" at Finish session.

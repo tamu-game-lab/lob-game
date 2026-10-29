@@ -11,7 +11,9 @@ Rules:
 - **The client.** The game (`PlaytestService`) queues rows and posts them in batches: about once a minute, at every run end, and at Finish session.
   - Each post is one HTTP POST of JSON with `Content-Type: text/plain;charset=utf-8`, so the browser sends no CORS preflight.
   - Posts never block play. A failed post is retried with exponential backoff and jitter: 5 s doubling to a 5 min cap, times 0.5-1.5.
-  - On the Web, pending rows are kept in the browser's local storage, so they survive a page reload.
+  - On the Web, pending rows are kept in the browser's local storage, so they survive a page reload. The queue is persisted only when dirty; a failed write keeps it dirty for retry.
+  - On `pagehide`, the Web page sends the next unsent batch with `navigator.sendBeacon` as `text/plain`, unless its UTF-8 JSON exceeds 60 KB. C# refreshes the page's endpoint and batch JSON at most once a second when the batch changes. The beacon uses the same batch id as the queued POST, so the server deduplicates it; the client retains the rows until a POST is acknowledged.
+  - A sending mode with a blank endpoint retains pending rows for "Download my data" without acknowledging them or making a network call. The download contains only the current session's rows.
 - **The sinks.** In the Editor and the Windows build, the same rows go to a local JSONL file instead of the network (`<persistentDataPath>/Playtest/session_<session>.jsonl`). `?mode=off` sends and writes nothing.
 - **The server.** The Google Apps Script web app (`apps-script/Code.gs` in the release repo):
   - validates each post;
@@ -53,9 +55,12 @@ At most 100 rows and 200 KB per post.
 | `?mode=off` | off | nothing is sent or written | any well-formed code passes |
 | `?mode=test` | test | `test_*` tabs (automated smoke test only; not linked anywhere) | any well-formed code passes |
 
-- `?id=P042` prefills the code, so a pre-test can hand off to the game.
+- The `mode` key is case-insensitive. Unrecognized mode values are refused on the ID screen.
+- `?id=P042` prefills the code only when the full value normalizes to a valid code, so a pre-test can hand off to the game.
 - `?fps=1` shows a frame counter. It is not data.
 - Tryout data is never research data (SR49): tryout and test tabs are for usability work only.
+- Local intro-seen, visited and concept-progress state is keyed by both mode and code; concept progress uses `lob.map.v1.<mode>.<CODE>`. Tryout completion never unlocks study content.
+- Save ownership is stored separately from the unchanged save format under `lob.save.owner` and `lob.run.owner`. Continue is offered only to the owning code; a legacy slot without an owner remains available to any code.
 
 ## 3. Study code
 - **Format:** 1-3 letters then 1-4 digits (`^[A-Za-z]{1,3}[0-9]{1,4}$`), stored upper-case (P042). Anything else is refused on the ID screen in every mode, so a name, email or student number cannot be entered.
@@ -69,7 +74,7 @@ At most 100 rows and 200 KB per post.
 | mode | text | `tryout` | `study`, `tryout` or `test`. |
 | build | text | `W1 2026-10-28` | Build label and date. |
 | code | text | `P042` | Study code. |
-| session | text (UUID) | `8f0c…4e11` | One per ID-screen Continue. A reload with the same code keeps the session. |
+| session | text (UUID) | `8f0c…4e11` | One per ID-screen Continue. A reload keeps the session only when code, mode and build match (within the resume window). |
 | row_seq | integer | 7 | Order of the row within its session, from 1. |
 | client_time | text (ISO 8601 UTC) | `2026-10-28T19:04:58Z` | When the game made the row. |
 | server_time | text (ISO 8601 UTC) | `2026-10-28T19:05:13Z` | Added by the server on append. |
@@ -84,19 +89,19 @@ The game repeats the five post fields (`schema`, `mode`, `build`, `code`, `sessi
 | platform | text | `web`, `windows`, `editor` | Where the game ran. |
 | browser | text | `chrome`, `edge`, `firefox`, `safari`, `other`, `none` | Browser family only (not the full user agent). |
 | screen | text | `1920x1080` | Canvas size in pixels at start. |
-| first_visit | boolean | TRUE | No earlier session for this code on this browser. |
-| intro_seen | boolean | FALSE | The intro was viewed before this session on this browser. |
+| first_visit | boolean | TRUE | No earlier session for this mode and code on this browser. |
+| intro_seen | boolean | FALSE | The intro was viewed before this session for this mode and code on this browser. |
 | seconds | integer | 1834 | (finish) Seconds from start to finish. |
-| nodes_completed | integer | 4 | (finish) Concept-map nodes completed this session. |
+| nodes_completed | integer | 4 | (finish) Distinct concept-map node ids completed this session. |
 | runs | integer | 3 | (finish) Runs started this session. |
 | pending | integer | 0 | (finish) Rows still unsent when Finish was pressed. |
-| downloaded | boolean | FALSE | (finish) The player saved the "Download my data" file. |
+| downloaded | boolean | FALSE | (finish) Clicking "Download my data" appends a finish status row with TRUE and a new `row_seq`; existing queued and beacon batch rows remain immutable for deduplication. The file contains only the finished session's pending rows. |
 
 ## 6. progress (kind = `progress`): the concept map
 | Field | Type | Values | Meaning |
 |---|---|---|---|
 | node | text | `bar_chart` | Concept-map node id (`MD Files\_concept_map.md`). |
-| action | text | `open`, `complete`, `leave`, `locked` | The node was opened, completed, left unfinished, or clicked while locked (study mode). |
+| action | text | `open`, `complete`, `leave` | The node was opened, completed, or left unfinished. |
 | seconds | integer | 142 | Seconds in the node (`complete`, `leave`). |
 | attempts | integer | 2 | Attempts at the node's task, where it has one. |
 | level | text | `L08` | The training or route the node opens, if any. |
@@ -115,7 +120,7 @@ The game repeats the five post fields (`schema`, `mode`, `build`, `code`, `sessi
 | budget | number | 650000 | (start) The run's starting budget. |
 | guided | boolean | FALSE | (start) The guided Training 8 bridge. |
 | day | integer | 46 | Sim day of the line (0 at start). |
-| outcome | text | `won`, `lost`, `quit` | (end) How it ended. |
+| outcome | text | `won`, `lost` | (end) How it ended. Abandoning is recorded as a `run_abandoned` event, not a run outcome. |
 | reason | text | `deadline` | (end) The engine's outcome reason id. |
 | score | number | 1840 | (end) The run's final score. |
 | budget_left | number | 37500 | (end) Budget remaining at the end. |
@@ -129,6 +134,8 @@ The game repeats the five post fields (`schema`, `mode`, `build`, `code`, `sessi
 | day | integer | 9 | Sim day (0 outside a run). |
 | type | text | `planning_stop`, `intro_view` | The telemetry event type (decision 44), or a lesson event (below). |
 | detail | text (JSON) | `{"crew":"PipeLaying"}` | The line's own key/value pairs as compact JSON. Values come from the game, never from player typing. |
+
+Run abandonment is an event with `type=run_abandoned`, emitted when the player abandons the run; it is not `runs.outcome=quit`.
 
 Lesson event types:
 - `intro_view` (`detail`: `{"part":"crews"}` …);
