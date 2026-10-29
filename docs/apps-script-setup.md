@@ -18,7 +18,7 @@ Where the data is stored has to match your IRB approval. These steps keep everyt
 6. Recommended: click the column letter **A** to select the whole column, then choose **Format > Number > Plain text**. This stops Sheets from turning a code such as `MAR1` into a date.
 7. Type your study codes from row 2 down (see "Adding study codes" below).
 
-Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `events`, `unmatched`, and the `tryout_` and `test_` tabs) are created automatically when the first data arrives.
+Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `events`, `unmatched`, and the `tryout_` and `test_` tabs) are created automatically when the first data arrives. The `settings` tab comes from Part 7, and `digest_queue` appears by itself if you use digest emails.
 
 ## Part 2: Add the script
 
@@ -45,7 +45,7 @@ Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `eve
     - If you see "Google hasn't verified this app", click **Advanced**, then **Go to LOB play data receiver (unsafe)**. The warning appears because you made the script yourself instead of installing it from Google.
     - If the next screen has checkboxes, tick all of them (or **Select all**). Then click **Allow**.
 
-    The script asks for access to your spreadsheets because it writes to this Sheet. It only ever opens the Sheet it is attached to.
+    The script asks for access to your spreadsheets because it writes to this Sheet. It only ever opens the Sheet it is attached to. It also asks to send email as you, to run when you are not present, and to see your email address: these are for the session emails in Part 7, which stay off until you turn them on.
 20. The window now shows **Web app** with a **URL** ending in `/exec`. Click **Copy** under the URL, then **Done**. Paste the URL somewhere you can find it again.
 
 ## Part 4: Test it
@@ -56,7 +56,7 @@ Don't create any other tabs. The data tabs (`sessions`, `progress`, `runs`, `eve
 
     You should see one line like:
 
-    `{"ok":true,"schema":1,"script":"lob-receiver 1.0.1 (2026-10-28)","time":"2026-10-28T19:05:13Z"}`
+    `{"ok":true,"schema":1,"script":"lob-receiver 1.1.0 (2026-10-29)","time":"2026-10-29T19:05:13Z"}`
 
     If you see `"ok":false` or an error page, go over steps 8 to 18 again.
 22. Open a private window (**Ctrl+Shift+N** in Chrome or Edge), where you are not signed in to Google, and open the same `?op=health` address there. You must see the same `"ok":true` line, because the game's players are not signed in either.
@@ -74,7 +74,7 @@ In a terminal in the repository folder, run it with your `/exec` URL from step 2
 node apps-script/test/load-test.js https://script.google.com/macros/s/AKfy...xyz/exec
 ```
 
-It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same moment in each round. It sends test data only (codes T900 to T999), so its rows go to the `test_` tabs, which you may delete afterwards. A good result:
+It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same moment in each round. It sends test data only (codes T900 to T999), so its rows go to the `test_` tabs, which you may delete afterwards. It never finishes a session, so it sends no session emails (Part 7). A good result:
 - `failures: 0`;
 - a `p95` under 8 seconds, how long the game waits for its last post when a player presses Finish session.
 
@@ -83,11 +83,48 @@ It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same mom
 24. Put the `/exec` URL into the game's config asset: **PlaytestConfig**, field **Endpoint**. *(Placeholder: the game team will confirm the exact asset and field name.)* If you are not editing the game yourself, send the URL to the game team.
 25. After the next game build, play once using the normal link (tryout mode). Within a minute or two, new `tryout_` tabs appear in the Sheet.
 
+## Part 7: Session emails
+
+From version 1.1.0 the script can email you when a player presses **Finish session**: one email per session, or, during class, one digest email an hour. An email holds the study code, the mode, the build, the session's start and finish times (in UTC), the number of rows in each tab, and a link to the Sheet. It never holds the play data itself. Emails are off until you turn them on.
+
+**The settings tab.** The script reads a tab named `settings`, with the columns `key` and `value`, each time a session finishes, so a change there works at once, without a new deployment.
+
+| key | value | What it does |
+|---|---|---|
+| `email_mode` | `off` (the default), `session` or `digest` | `off`: no emails. `session`: one email per finished session. `digest`: finished sessions wait in a `digest_queue` tab, and one email lists them every `digest_minutes`. |
+| `email_to` | blank (the default) | Blank sends the emails to you, the account that deployed the script. To send them elsewhere, type an address, or several separated by commas. |
+| `digest_minutes` | `60` (the default) | How often the digest goes out: 5, 10, 15, 30, 60, 120, 240, 360, 480 or 720 minutes. It takes effect when you install the digest timer (step 33). |
+
+A value the script cannot use (a typo, say) counts as `off` (for `digest_minutes`, as 60), and the health check lists its key under `ignored_settings`.
+
+26. If your web app already runs an earlier version (the `script` value of the health check in step 21 shows `lob-receiver 1.0.1`), first put in the new files: replace **Code.gs** as in steps 10 and 11, and **appsscript.json** as in step 13, then click **Save project**. Don't deploy yet.
+27. At the top of the script editor, open the list of functions (to the right of **Debug**), choose **setupSettings**, and click **Run**.
+28. If Google asks you to authorize the script (it does when the web app was set up with an earlier version, because 1.1.0 needs three more permissions), click **Review permissions** and choose your TAMU account. If you see "Google hasn't verified this app", click **Advanced**, then **Go to LOB play data receiver (unsafe)**, as in step 19. Tick every checkbox (or **Select all**), then click **Allow**. Google's wording for the new permissions may differ a little:
+    - **Send email as you**: for the session emails.
+    - **Allow this application to run when you are not present**: for the digest timer (it manages the script's triggers).
+    - **See your primary Google Account email address**: so the emails go to you.
+29. When the run finishes, the Sheet has a new tab, `settings`, with `email_mode` set to `off`, `email_to` blank and `digest_minutes` set to `60`. Running **setupSettings** again changes nothing: it only puts back a setting that is missing, and never changes a value you typed.
+30. If you did step 26, deploy the new version: **Deploy > Manage deployments**, select the active deployment, click the pencil icon (**Edit**), under **Version** choose **New version**, click **Deploy**, then **Done**. The `/exec` URL stays the same, so the game needs no change.
+31. Open the `?op=health` address from step 21 again. It now shows `lob-receiver 1.1.0` and ends with `"email":"off"`.
+32. To turn emails on, type `session` or `digest` in the `value` cell next to `email_mode`. The health check shows the new mode at once.
+
+**Digest emails during class.**
+
+33. Before class, set `email_mode` to `digest`. In the script editor, choose **installDigestTrigger** in the list of functions and click **Run**. This installs a timer that runs **sendDigest** every `digest_minutes` (every hour by default). To check it, click the clock icon **Triggers** in the left bar: there is one trigger, for `sendDigest`. Running **installDigestTrigger** again replaces the timer rather than adding a second one; do that after you change `digest_minutes`.
+34. During class, each hour in which sessions finish brings one email that lists them, one line per session. They wait in the `digest_queue` tab until then, and each email deletes the lines it listed. An hour in which no session finishes sends nothing.
+35. After class, choose **sendDigest** and click **Run** to send what is still waiting, then choose **removeDigestTrigger** and click **Run**. Set `email_mode` back to `off` or `session`.
+
+Good to know:
+- A post that the game sends twice (a retry) never sends a second email or adds a second line.
+- If an email cannot be sent (for example, after Google's daily email limit), the play data is still stored. The failure shows under **Executions** with no play data in it, and in digest mode the lines stay in `digest_queue` for the next run.
+- The link in the emails opens the Sheet only for accounts it is shared with.
+- After any change to the code, deploy a new version: **Deploy > Manage deployments**, **Edit**, **New version**, **Deploy** (step 30, and "Updating the script later" below). The `/exec` URL stays the same. A change in the `settings` tab needs no deployment.
+
 ## Updating the script later (the URL stays the same)
 
 When the game team sends a new `Code.gs`:
 
-1. Replace the contents of **Code.gs** as in steps 10 and 11, then click **Save project**.
+1. Replace the contents of **Code.gs** as in steps 10 and 11, then click **Save project**. If the update also brings a new `appsscript.json` (version 1.1.0 does), replace it as in step 13, save, and run **setupSettings** once (steps 27 and 28) so Google can ask for the new permissions before you deploy.
 2. Choose **Deploy > Manage deployments**.
 3. Select the active deployment on the left, then click the pencil icon (**Edit**).
 4. Under **Version**, choose **New version**. Leave everything else as it is.
@@ -117,9 +154,11 @@ To confirm the update, open the `?op=health` address again: the `script` value s
 | `unmatched` | Study-mode rows whose code was not an active code. `target_tab` says where each one belongs. |
 | `tryout_sessions` ... `tryout_events` | The normal game link (tryout mode). For usability work only; not research data. |
 | `test_sessions` ... `test_events` | The game team's automated test (`?mode=test`). Not research data. |
+| `settings` | The session-email settings (Part 7). You change the `value` cells. |
+| `digest_queue` | Finished sessions waiting for the next digest email (Part 7). The script deletes each line once it is emailed. |
 
 - The script matches columns by their header (row 1) and adds a column on the right when a new kind of field arrives. You may move columns around, but don't rename or delete header cells and don't rename tabs: the script would start a new column or a new tab.
-- The script only adds rows; it never changes or deletes them. A row sent twice (rare: a retry that arrives hours later) has the same `session` and `row_seq` as an earlier row.
+- The script only adds rows to the data tabs; it never changes or deletes them. (The only rows it deletes are `digest_queue` lines it has emailed.) A row sent twice (rare: a retry that arrives hours later) has the same `session` and `row_seq` as an earlier row.
 - Keep the Sheet private. The web app writes to it as you, so nobody else needs access to the Sheet.
 - For analysis, work on a copy (**File > Make a copy**) or a download (**File > Download**) rather than in the data tabs.
 - The script never writes the data into its logs. **Executions** (in the script editor's left bar) shows only counts and error types.
@@ -142,4 +181,5 @@ Whichever way you go, the place where the data is stored has to match your IRB a
 
 - Offline tests (Node.js only, no packages): `node apps-script/test/run-tests.js`
 - Bump `SCRIPT_VERSION` in `Code.gs` with every change; `?op=health` shows it.
+- `setupSettings`, `installDigestTrigger`, `removeDigestTrigger` and `sendDigest` are run from the script editor (or, for `sendDigest`, by its trigger), never through the web app.
 - Contract: `docs/data-dictionary.md` (schema 1).

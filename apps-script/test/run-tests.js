@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { createServices, MimeType } = require('./fakes');
+const { createServices, MimeType, DEPLOYER, SHEET_URL } = require('./fakes');
 
 const CODE = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const SESSION = '8f0c2a6e-3b1d-4d7e-9a51-2f6c0b9d4e11';
@@ -71,6 +71,11 @@ const runRow = extra => row('run', {
   stars: 2, seconds: 615,
 }, extra);
 const eventRow = extra => row('event', { run: '', seq: 12, day: 9, type: 'planning_stop', detail: '{"crew":"PipeLaying"}' }, extra);
+// The row the game adds at Finish session; its seconds put the session's start at FINISH_START.
+const finishRow = extra => row('session', {
+  phase: 'finish', seconds: 1834, nodes_completed: 4, runs: 3, pending: 0, downloaded: false,
+}, extra);
+const FINISH_START = '2026-10-28T18:34:24Z'; // CLIENT_TIME minus 1834 s
 
 function body(overrides) {
   return Object.assign({
@@ -739,6 +744,266 @@ test('a script that is not bound to a sheet fails health, and posts ask the clie
   const env = makeEnv({ unbound: true });
   assert.deepStrictEqual(get(env, { op: 'health' }), { ok: false, error: 'not bound to a sheet' });
   assert.deepStrictEqual(post(env, body()), { ok: false, error: 'server', retry: true });
+});
+
+// ------------------------------------------------------------------ session emails (receiver 1.1.0)
+
+/** Runs setupSettings(), then types each value into the settings tab next to its key. */
+function emailSettings(env, values) {
+  env.context.setupSettings();
+  Object.keys(values).forEach(key => setSetting(env, key, values[key]));
+}
+
+function setSetting(env, key, value) {
+  const sheet = tab(env, 'settings');
+  const index = sheet.records().findIndex(r => r.key === key);
+  assert.ok(index >= 0, 'the settings tab has ' + key);
+  sheet.getRange(index + 2, 2).setValues([[value]]);
+}
+
+test('session mode: a finish sends one email, after the lock is released, with the code, mode, build, start, finish, row counts and Sheet link, and no row data', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'session' });
+  const marker = 'marker4417';
+  post(env, body({ rows: [sessionRow({ screen: marker }), progressRow({ node: marker }), eventRow({ type: marker, detail: '{"m":"' + marker + '"}' })] }));
+  assert.strictEqual(env.mail.sent.length, 0, 'a post without the finish row sends nothing');
+  const held = [];
+  env.mail.onSend = () => held.push(env.locks.held);
+  const last = body({ rows: [eventRow({ type: marker }), finishRow()] });
+  assert.deepStrictEqual(post(env, last), { ok: true, appended: 2 });
+  assert.deepStrictEqual(held, [false], 'one email, sent with the lock released');
+  const mail = env.mail.sent[0];
+  assert.strictEqual(mail.to, DEPLOYER, 'a blank email_to sends to the deploying account');
+  assert.strictEqual(mail.subject, 'LOB session finished: P042 (tryout)');
+  assert.deepStrictEqual(mail.body.split('\n'), [
+    'Code: P042',
+    'Mode: tryout',
+    'Build: W1 2026-10-28',
+    'Start: ' + FINISH_START,
+    'Finish: ' + CLIENT_TIME,
+    'Rows in the finishing post: sessions 1, progress 0, runs 0, events 1',
+    'Total rows for this code: sessions 2, progress 1, runs 0, events 2',
+    'Sheet: ' + SHEET_URL,
+  ]);
+  const text = (mail.subject + '\n' + mail.body).toLowerCase();
+  [marker, SESSION, last.batch, 'bars_to_lines', 'planning_stop', 'pipelaying', 'chrome', '1920x1080', '1834'].forEach(s => {
+    assert.ok(!text.includes(s.toLowerCase()), 'the email must not contain ' + s);
+  });
+  assert.ok(!env.spreadsheet.sheetNames().includes('digest_queue'));
+});
+
+test('digest mode: a finish queues one line and sends no email; sendDigest() sends one email and deletes only the lines it sent', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'digest' });
+  post(env, body({ rows: [sessionRow(), progressRow()] }));
+  post(env, body({ rows: [finishRow()] }));
+  post(env, body({ code: 'Q7', session: OTHER_SESSION, rows: [sessionRow(), eventRow(), finishRow({ seconds: 60 })] }));
+  assert.strictEqual(env.mail.sent.length, 0, 'no per-session email');
+  const queue = tab(env, 'digest_queue');
+  assert.deepStrictEqual(queue.header(), ['code', 'mode', 'build', 'start', 'finish',
+    'added_sessions', 'added_progress', 'added_runs', 'added_events', 'added_unmatched', 'queued_at']);
+  const lines = queue.records();
+  lines.forEach(line => assert.match(line.queued_at, ISO_SECONDS));
+  const counts = (s, p, r, e) => ({ added_sessions: s, added_progress: p, added_runs: r, added_events: e, added_unmatched: 0 });
+  assert.deepStrictEqual(lines.map(line => without(line, 'queued_at')), [
+    Object.assign({ code: 'P042', mode: 'tryout', build: 'W1 2026-10-28', start: FINISH_START, finish: CLIENT_TIME }, counts(1, 0, 0, 0)),
+    Object.assign({ code: 'Q7', mode: 'tryout', build: 'W1 2026-10-28', start: '2026-10-28T19:03:58Z', finish: CLIENT_TIME }, counts(2, 0, 0, 1)),
+  ]);
+
+  // The lock keeps posts out while sendDigest() runs; a line written meanwhile checks that its delete is exact.
+  const late = Object.assign({ code: 'P044', mode: 'tryout', build: 'W1 2026-10-28', start: '', finish: CLIENT_TIME, queued_at: CLIENT_TIME }, counts(1, 0, 0, 0));
+  env.mail.onSend = () => queue.appendRow(queue.header().map(name => late[name]));
+  env.context.sendDigest();
+  env.mail.onSend = null;
+  assert.strictEqual(env.mail.sent.length, 1);
+  assert.strictEqual(env.mail.sent[0].to, DEPLOYER);
+  assert.strictEqual(env.mail.sent[0].subject, 'LOB digest: 2 sessions finished');
+  assert.deepStrictEqual(env.mail.sent[0].body.split('\n'), [
+    'P042 (tryout); build W1 2026-10-28; start ' + FINISH_START + '; finish ' + CLIENT_TIME +
+      '; rows in the finishing post: sessions 1, progress 0, runs 0, events 0; total rows for this code: sessions 2, progress 1, runs 0, events 0',
+    'Q7 (tryout); build W1 2026-10-28; start 2026-10-28T19:03:58Z; finish ' + CLIENT_TIME +
+      '; rows in the finishing post: sessions 2, progress 0, runs 0, events 1; total rows for this code: sessions 2, progress 0, runs 0, events 1',
+    '',
+    'Sheet: ' + SHEET_URL,
+  ]);
+  assert.deepStrictEqual(queue.records().map(line => line.code), ['P044'], 'only the two lines it sent are deleted');
+
+  env.context.sendDigest();
+  assert.strictEqual(env.mail.sent[1].subject, 'LOB digest: 1 session finished');
+  assert.ok(env.mail.sent[1].body.startsWith('P044 (tryout); build W1 2026-10-28; start unknown; finish ' + CLIENT_TIME + ';'));
+  assert.deepStrictEqual(queue.records(), []);
+  env.context.sendDigest();
+  assert.strictEqual(env.mail.sent.length, 2, 'an empty queue sends nothing');
+  assert.strictEqual(env.locks.held, false);
+  assert.strictEqual(env.locks.releases, env.locks.waits.length);
+});
+
+test('email_mode off, the default, sends and queues nothing, and so does a receiver without a settings tab', () => {
+  [true, false].forEach(setup => {
+    const env = makeEnv();
+    if (setup) env.context.setupSettings();
+    assert.deepStrictEqual(post(env, body({ rows: [sessionRow(), finishRow()] })), { ok: true, appended: 2 });
+    env.context.sendDigest();
+    assert.strictEqual(env.mail.sent.length, 0);
+    assert.ok(!env.spreadsheet.sheetNames().includes('digest_queue'));
+    assert.strictEqual(env.locks.waits.length, 1, 'only the post took the lock');
+  });
+});
+
+test('a re-posted finish (a duplicate batch) sends no second email and queues no second line', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'session' });
+  const first = body({ rows: [finishRow()] });
+  post(env, first);
+  assert.deepStrictEqual(post(env, first), { ok: true, appended: 0, duplicate: true });
+  assert.strictEqual(env.mail.sent.length, 1);
+  // A copy that gets the lock while this one waits is caught under the lock, and sends nothing either.
+  const second = body({ rows: [finishRow()] });
+  env.locks.onWait = () => {
+    env.locks.onWait = null;
+    post(env, second);
+  };
+  assert.deepStrictEqual(post(env, second), { ok: true, appended: 0, duplicate: true });
+  assert.strictEqual(env.mail.sent.length, 2);
+  setSetting(env, 'email_mode', 'digest');
+  const third = body({ rows: [finishRow()] });
+  post(env, third);
+  assert.deepStrictEqual(post(env, third), { ok: true, appended: 0, duplicate: true });
+  assert.strictEqual(tab(env, 'digest_queue').records().length, 1);
+  assert.strictEqual(env.mail.sent.length, 2);
+});
+
+test('the "Download my data" status row (downloaded TRUE) is stored but is not a second finish', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'session' });
+  post(env, body({ rows: [finishRow()] }));
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow({ downloaded: true })] })), { ok: true, appended: 1 });
+  assert.strictEqual(env.mail.sent.length, 1);
+  assert.strictEqual(tab(env, 'tryout_sessions').records().length, 2);
+});
+
+test('a mail failure is logged without the address and the post still succeeds; email_to overrides the deploying account', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'session', email_to: 'inbox@example.com' });
+  env.mail.failWith = 'Invalid email: inbox@example.com';
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.strictEqual(tab(env, 'tryout_sessions').records().length, 1);
+  assert.strictEqual(env.mail.sent.length, 0);
+  assert.strictEqual(env.logs[env.logs.length - 1], 'error: email failed (session email): Error: Exception: Invalid email: <address>');
+  assert.strictEqual(env.locks.held, false);
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(env.mail.sent.map(m => m.to), ['inbox@example.com']);
+  assert.ok(!env.logs.join('\n').includes('@'), 'no address in the logs');
+});
+
+test('digest failures never fail a post or lose a line: a queue lock timeout is logged, and a failed digest keeps its lines', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'digest' });
+  const before = env.locks.waits.length;
+  env.locks.onWait = () => {
+    env.locks.busy = env.locks.waits.length > before + 1; // the post gets the lock; the queue's wait times out
+  };
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  env.locks.onWait = null;
+  env.locks.busy = false;
+  assert.ok(env.logs[env.logs.length - 1].startsWith('error: email failed (digest queue): Error: Exception: Lock timeout'));
+  assert.ok(!env.spreadsheet.sheetNames().includes('digest_queue'));
+  assert.strictEqual(tab(env, 'tryout_sessions').records().length, 1);
+
+  post(env, body({ rows: [finishRow()] }));
+  env.mail.failWith = 'Service invoked too many times for one day: email.';
+  env.context.sendDigest();
+  assert.strictEqual(env.logs[env.logs.length - 1], 'error: email failed (digest): Error: Exception: Service invoked too many times for one day: email.');
+  assert.strictEqual(tab(env, 'digest_queue').records().length, 1, 'the line waits for the next run');
+  assert.strictEqual(env.locks.held, false);
+  env.context.sendDigest();
+  assert.strictEqual(env.mail.sent.length, 1);
+  assert.deepStrictEqual(tab(env, 'digest_queue').records(), []);
+});
+
+test('health shows 1.1.0 and, once the settings tab exists, the effective email mode; a value it cannot use counts as off and is listed by key only', () => {
+  const env = makeEnv();
+  const health = () => get(env, { op: 'health' });
+  assert.ok(health().script.startsWith('lob-receiver 1.1.0 '), health().script);
+  assert.deepStrictEqual(Object.keys(health()).sort(), ['ok', 'schema', 'script', 'time'], 'no settings tab: 1.0.1\'s fields');
+  env.context.setupSettings();
+  assert.deepStrictEqual(Object.keys(health()).sort(), ['email', 'ok', 'schema', 'script', 'time']);
+  assert.strictEqual(health().email, 'off');
+  const shows = (key, value) => {
+    setSetting(env, key, value);
+    const reply = health();
+    return [reply.email, reply.ignored_settings];
+  };
+  assert.deepStrictEqual(shows('email_mode', 'session'), ['session', undefined]);
+  assert.deepStrictEqual(shows('email_mode', ' Digest '), ['digest', undefined]);
+  assert.deepStrictEqual(shows('email_mode', 'hourly'), ['off', ['email_mode']]);
+  assert.deepStrictEqual(shows('email_mode', 'session'), ['session', undefined]);
+  assert.deepStrictEqual(shows('email_to', 'not an address'), ['off', ['email_to']]);
+  assert.ok(!JSON.stringify(health()).includes('not an address'), 'never the value');
+  assert.deepStrictEqual(shows('email_to', 'a@example.com, b@example.com'), ['session', undefined]);
+  assert.deepStrictEqual(shows('digest_minutes', 45), ['session', ['digest_minutes']]);
+  assert.deepStrictEqual(shows('digest_minutes', 15), ['session', undefined]);
+});
+
+test('setupSettings() makes the settings tab with its defaults; running it again changes nothing, keeps edited values and only restores a missing key', () => {
+  const env = makeEnv();
+  env.context.setupSettings();
+  const sheet = tab(env, 'settings');
+  const defaults = [{ key: 'email_mode', value: 'off' }, { key: 'email_to', value: '' }, { key: 'digest_minutes', value: 60 }];
+  assert.deepStrictEqual(sheet.header(), ['key', 'value']);
+  assert.deepStrictEqual(sheet.records(), defaults);
+  const writes = env.spreadsheet.writes.length;
+  env.context.setupSettings();
+  assert.strictEqual(env.spreadsheet.writes.length, writes, 'a second run writes nothing');
+  assert.deepStrictEqual(sheet.records(), defaults);
+  assert.strictEqual(env.logs[env.logs.length - 1], 'log: settings: nothing to add');
+  setSetting(env, 'email_mode', 'digest');
+  sheet.getRange(4, 1, 1, 2).setValues([['', '']]); // the digest_minutes row cleared by hand
+  env.context.setupSettings();
+  assert.deepStrictEqual(sheet.records(), [{ key: 'email_mode', value: 'digest' }, defaults[1], defaults[2]]);
+});
+
+test('installDigestTrigger() leaves exactly one sendDigest trigger, every digest_minutes; removeDigestTrigger() removes it; both can run twice', () => {
+  const env = makeEnv();
+  env.context.setupSettings();
+  env.scriptApp.newTrigger('otherJob').timeBased().everyHours(12).create(); // not the digest's: it stays
+  const triggers = () => env.scriptApp.getProjectTriggers().map(t => t.getHandlerFunction() + ' every ' + t.every);
+  env.context.installDigestTrigger();
+  env.context.installDigestTrigger();
+  assert.deepStrictEqual(triggers(), ['otherJob every 12 hours', 'sendDigest every 1 hours']);
+  setSetting(env, 'digest_minutes', 15);
+  env.context.installDigestTrigger();
+  assert.deepStrictEqual(triggers(), ['otherJob every 12 hours', 'sendDigest every 15 minutes']);
+  setSetting(env, 'digest_minutes', 120);
+  env.context.installDigestTrigger();
+  assert.deepStrictEqual(triggers(), ['otherJob every 12 hours', 'sendDigest every 2 hours']);
+  env.context.removeDigestTrigger();
+  env.context.removeDigestTrigger();
+  assert.deepStrictEqual(triggers(), ['otherJob every 12 hours']);
+});
+
+test('a study finish from a code that is not active still sends its email, counting the unmatched rows', () => {
+  const env = makeEnv();
+  addCodes(env, [['P042', 'TRUE']]);
+  emailSettings(env, { email_mode: 'session' });
+  post(env, body({ mode: 'study', code: 'Q777', rows: [sessionRow(), eventRow()] }));
+  post(env, body({ mode: 'study', code: 'Q777', rows: [finishRow()] }));
+  assert.strictEqual(env.mail.sent.length, 1);
+  assert.strictEqual(env.mail.sent[0].subject, 'LOB session finished: Q777 (study)');
+  assert.deepStrictEqual(env.mail.sent[0].body.split('\n').slice(5, 7), [
+    'Rows in the finishing post: sessions 0, progress 0, runs 0, events 0, unmatched 1',
+    'Total rows for this code: sessions 0, progress 0, runs 0, events 0, unmatched 3',
+  ]);
+});
+
+test('an email holds no client text: the build keeps label characters only, and times that do not parse show as unknown', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'session' });
+  post(env, body({ build: 'W2\nSheet: https://evil.example/a@b', rows: [finishRow({ client_time: 'yesterday', seconds: 'x' })] }));
+  const lines = env.mail.sent[0].body.split('\n');
+  assert.strictEqual(lines.length, 8);
+  assert.deepStrictEqual(lines.slice(2, 5), ['Build: W2?Sheet? https???evil.example?a?b', 'Start: unknown', 'Finish: unknown']);
+  assert.ok(!lines.join('\n').includes('@'));
 });
 
 // ------------------------------------------------------------------ load-test.js (offline checks; it is never run here)

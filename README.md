@@ -27,5 +27,6 @@ Codes are pseudonymous: one to three letters and one to four digits, such as P04
 |---|---|---|---|
 | W1 | 1.1-W1 | 2026-10-28 (replaced by W2) | Tryouts: the study-code screen, the main screen and the data pipeline. |
 | W2 | 1.2-W2 | 2026-10-28 (live) | Adds the concept map and the intro from the crews to the bar chart to the Line of Balance. |
+| Receiver | 1.1.0 | 2026-10-29 (`apps-script/`) | The Apps Script receiver emails the study team when a session finishes: one email per session, or an hourly digest during class, set in the Sheet's `settings` tab. Counts and a link to the Sheet only, never the data. Setup: `docs/apps-script-setup.md`, Part 7. |
 
 Play data is sent only once the study team's Apps Script address is set in a build (see `docs/apps-script-setup.md`). Until then the game keeps a player's rows for "Download my data" at Finish session.

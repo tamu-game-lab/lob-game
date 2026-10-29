@@ -147,3 +147,8 @@ Lesson event types:
 | Schema | Date | Change |
 |---|---|---|
 | 1 | 2026-10-28 | First version (Marathon 7, SR49). |
+
+## 10. Admin tabs
+Receiver 1.1.0 (the SR49 amendment, session emails) adds two admin tabs. They hold no play data, so the schema stays 1:
+- `settings` (`key`, `value`): `email_mode` (`off`, `session` or `digest`), `email_to` (blank: the deploying account) and `digest_minutes`. `setupSettings()` makes it (`docs/apps-script-setup.md`, Part 7). Once it exists, `?op=health` also returns `email`, the mode in effect, and lists any setting it could not use under `ignored_settings` (keys only).
+- `digest_queue`: in digest mode, one line per finished session until the next digest email sends and deletes it: `code`, `mode`, `build`, `start`, `finish`, the finishing post's rows per tab (`added_sessions` to `added_unmatched`) and `queued_at`.

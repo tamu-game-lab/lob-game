@@ -19,10 +19,19 @@
  * after some tabs were written. Every row carries session and row_seq, so analysis
  * can drop such duplicates.
  *
+ * Session emails (1.1.0): when a post stores the row that marks a session's finish, the
+ * settings tab decides: email_mode off (the default) does nothing, session emails a
+ * summary at once, and digest queues it in digest_queue for sendDigest(), which a time
+ * trigger runs. A summary holds the code, mode, build, start, finish, row counts and the
+ * Sheet's link, never row contents. setupSettings() and installDigestTrigger() are run
+ * from the script editor (docs/apps-script-setup.md, Part 7). The manifest's scopes:
+ * spreadsheets (as before), script.send_mail (MailApp), script.scriptapp (the trigger)
+ * and userinfo.email (the deploying account's address, the default recipient).
+ *
  * Offline tests: node apps-script/test/run-tests.js
  */
 
-const SCRIPT_VERSION = 'lob-receiver 1.0.1 (2026-10-28)';
+const SCRIPT_VERSION = 'lob-receiver 1.1.0 (2026-10-29)';
 const SCHEMA = 1;
 
 const MAX_BODY_BYTES = 200 * 1024; // "at most 200 KB per post", counted in UTF-8 bytes
@@ -56,6 +65,18 @@ const CODE_RE = /^[A-Za-z]{1,3}[0-9]{1,4}$/;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const FIELD_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
+// Session emails. setupSettings() writes these defaults to the settings tab; a blank
+// email_to means the deploying account's own address.
+const SETTINGS_TAB = 'settings';
+const QUEUE_TAB = 'digest_queue';
+const SETTING_DEFAULTS = [['email_mode', 'off'], ['email_to', ''], ['digest_minutes', 60]];
+const EMAIL_MODES = ['off', 'session', 'digest'];
+// The intervals a time trigger runs at: every 5, 10, 15 or 30 minutes, or every 1, 2, 4,
+// 6, 8 or 12 hours. One minute is left out, so a "1" meant as an hour is not taken.
+const DIGEST_MINUTES = [5, 10, 15, 30, 60, 120, 240, 360, 480, 720];
+const DIGEST_FUNCTION = 'sendDigest';
+const ADDRESS_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+
 /**
  * Web app POST: one batch of rows from the game.
  * Replies {"ok":true,"appended":N}, {"ok":true,"appended":0,"duplicate":true},
@@ -78,13 +99,25 @@ function doPost(e) {
   }
 }
 
-/** Web app GET: ?op=health, or ?op=code&code=P042 (answers for that one code; never lists codes). */
+/**
+ * Web app GET: ?op=health, or ?op=code&code=P042 (answers for that one code; never lists codes).
+ * Once setupSettings() has made the settings tab, health also reports the effective email
+ * mode, and the keys (never the values) of any setting it ignored; before that its reply
+ * keeps 1.0.1's fields, and emails are off.
+ */
 function doGet(e) {
   const params = (e && e.parameter) || {};
   try {
     if (params.op === 'health') {
-      if (!SpreadsheetApp.getActiveSpreadsheet()) return reply_({ ok: false, error: 'not bound to a sheet' });
-      return reply_({ ok: true, schema: SCHEMA, script: SCRIPT_VERSION, time: isoNow_() });
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      if (!ss) return reply_({ ok: false, error: 'not bound to a sheet' });
+      const health = { ok: true, schema: SCHEMA, script: SCRIPT_VERSION, time: isoNow_() };
+      const settings = readSettings_(ss);
+      if (settings.present) {
+        health.email = settings.mode;
+        if (settings.ignored.length > 0) health.ignored_settings = settings.ignored;
+      }
+      return reply_(health);
     }
     if (params.op === 'code') {
       const code = typeof params.code === 'string' ? params.code : '';
@@ -214,6 +247,7 @@ function storePost_(post) {
     lock.releaseLock();
   }
   console.log('appended rows=' + post.rows.length + ' tabs=' + tabCount + (matched ? '' : ' unmatched'));
+  notifyFinish_(ss, post, matched);
   return reply_({ ok: true, appended: post.rows.length });
 }
 
@@ -360,6 +394,358 @@ function isActiveCell_(value) {
   if (typeof value !== 'string') return false;
   const text = value.trim().toUpperCase();
   return text === '' || text === 'TRUE';
+}
+
+/**
+ * Session emails, once a post is stored and the lock released. When the post holds the
+ * row that marks its session's finish, the settings tab decides: email_mode off does
+ * nothing, session emails the summary now, and digest queues it for sendDigest(). A
+ * duplicate post never gets here, so a retry sends no second email. It never throws: a
+ * settings, mail or queue failure is logged, and the post keeps its normal reply.
+ */
+function notifyFinish_(ss, post, matched) {
+  const finish = post.rows.find(isFinishRow_);
+  if (!finish) return;
+  let stage = 'settings';
+  try {
+    const settings = readSettings_(ss);
+    if (settings.mode === 'session') {
+      stage = 'session email';
+      const totals = codeTotals_(ss, post.mode, [post.code]).get(post.code);
+      sendMail_(settings, sessionEmail_(finishSummary_(post, matched, finish), totals, ss.getUrl()));
+    } else if (settings.mode === 'digest') {
+      stage = 'digest queue';
+      queueFinish_(ss, finishSummary_(post, matched, finish));
+    }
+  } catch (err) {
+    emailFailed_(stage, err);
+  }
+}
+
+/**
+ * The row that marks a session's finish (data dictionary, sessions): phase finish. The
+ * status row that "Download my data" adds afterwards (downloaded TRUE) is not a second finish.
+ */
+function isFinishRow_(row) {
+  return row.kind === 'session' && row.phase === 'finish' && row.downloaded !== true;
+}
+
+/**
+ * What the emails say about a finished session, and nothing from the rows' contents:
+ * finish is the finish row's client_time and start is finish minus its seconds (the
+ * dictionary's "seconds from start to finish"), both rewritten as ISO UTC times, or ''
+ * when they do not parse; added counts this post's rows per tab.
+ */
+function finishSummary_(post, matched, finish) {
+  const finishMs = Date.parse(finish.client_time);
+  const seconds = finish.seconds;
+  return {
+    code: post.code,
+    mode: post.mode,
+    build: emailBuild_(post.build),
+    start: typeof seconds === 'number' && seconds >= 0 ? isoAt_(finishMs - seconds * 1000) : '',
+    finish: isoAt_(finishMs),
+    added: addedCounts_(post, matched),
+  };
+}
+
+/** This post's rows per tab, where groupRows_ sent them: the mode's tab for their kind, or unmatched. */
+function addedCounts_(post, matched) {
+  const counts = emptyCounts_();
+  post.rows.forEach(row => {
+    counts[matched ? KIND_TAB[row.kind] : UNMATCHED_TAB] += 1;
+  });
+  return counts;
+}
+
+/**
+ * Rows per tab for each code, in the mode's four tabs and, in study mode, the unmatched
+ * tab: a Map from code to counts keyed like emptyCounts_().
+ */
+function codeTotals_(ss, mode, codes) {
+  const totals = new Map(codes.map(code => [code, emptyCounts_()]));
+  Object.keys(emptyCounts_()).forEach(name => {
+    if (name === UNMATCHED_TAB && mode !== 'study') return;
+    const counts = codeCounts_(ss, name === UNMATCHED_TAB ? name : MODE_PREFIX[mode] + name);
+    totals.forEach((total, code) => {
+      total[name] = counts.get(code) || 0;
+    });
+  });
+  return totals;
+}
+
+/** How many rows each code has in a tab, from its column headed "code"; empty when the tab or column is missing. */
+function codeCounts_(ss, tabName) {
+  const counts = new Map();
+  const sheet = ss.getSheetByName(tabName);
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  const lastCol = sheet ? sheet.getLastColumn() : 0;
+  if (lastRow < 2 || lastCol < 1) return counts;
+  const col = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim()).indexOf('code');
+  if (col < 0) return counts;
+  sheet.getRange(2, col + 1, lastRow - 1, 1).getValues().forEach(line => {
+    const code = String(line[0]).trim().toUpperCase();
+    if (code !== '') counts.set(code, (counts.get(code) || 0) + 1);
+  });
+  return counts;
+}
+
+/** Zero rows in each tab the emails count: sessions, progress, runs and events (no mode prefix), and unmatched. */
+function emptyCounts_() {
+  const counts = {};
+  Object.keys(KIND_TAB).forEach(kind => {
+    counts[KIND_TAB[kind]] = 0;
+  });
+  counts[UNMATCHED_TAB] = 0;
+  return counts;
+}
+
+/** "sessions 1, progress 0, runs 0, events 12", then "unmatched N" when N > 0. */
+function countsText_(counts) {
+  return Object.keys(counts)
+    .filter(name => name !== UNMATCHED_TAB || counts[name] > 0)
+    .map(name => name + ' ' + counts[name])
+    .join(', ');
+}
+
+/** The session-mode email: the fields one per line, then the Sheet's link. */
+function sessionEmail_(summary, totals, url) {
+  return {
+    subject: 'LOB session finished: ' + summary.code + ' (' + summary.mode + ')',
+    body: [
+      'Code: ' + summary.code,
+      'Mode: ' + summary.mode,
+      'Build: ' + summary.build,
+      'Start: ' + (summary.start || 'unknown'),
+      'Finish: ' + (summary.finish || 'unknown'),
+      'Rows in the finishing post: ' + countsText_(summary.added),
+      'Total rows for this code: ' + countsText_(totals),
+      'Sheet: ' + url,
+    ].join('\n'),
+  };
+}
+
+/**
+ * Digest mode: appends the summary as one line of the digest_queue tab (by header name,
+ * like the data tabs). It takes the script lock again, briefly, so the line never races
+ * another append or a sendDigest() deleting the lines it sent.
+ */
+function queueFinish_(ss, summary) {
+  const line = {
+    code: summary.code,
+    mode: summary.mode,
+    build: summary.build,
+    start: summary.start,
+    finish: summary.finish,
+  };
+  Object.keys(summary.added).forEach(name => {
+    line['added_' + name] = summary.added[name];
+  });
+  line.queued_at = isoNow_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_WAIT_MS);
+  try {
+    writeTab_(ss, planTab_(ss, QUEUE_TAB, [line]));
+    SpreadsheetApp.flush(); // as in storePost_: the next append, under the lock, must see this line
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Run by the time trigger that installDigestTrigger() makes: emails one list of the queued
+ * sessions, one line each with the session email's fields, and the Sheet's link, then
+ * deletes the lines it sent. An empty queue, or email_mode off, sends nothing. It holds
+ * the script lock from reading the queue to deleting the lines (a second or two a run),
+ * so no line arrives or is sent twice in between. A failure is logged, and the lines stay
+ * queued for the next run.
+ */
+function sendDigest() {
+  try {
+    const ss = spreadsheet_();
+    const settings = readSettings_(ss);
+    if (settings.mode === 'off') {
+      console.log('digest: email_mode is off, nothing sent');
+      return;
+    }
+    const lock = LockService.getScriptLock();
+    lock.waitLock(LOCK_WAIT_MS);
+    try {
+      const queue = readQueue_(ss);
+      if (queue.lines.length === 0) return;
+      sendMail_(settings, digestEmail_(ss, queue.lines));
+      queue.sheet.deleteRows(2, queue.rows);
+      SpreadsheetApp.flush();
+      console.log('digest sent sessions=' + queue.lines.length);
+    } finally {
+      lock.releaseLock();
+    }
+  } catch (err) {
+    emailFailed_('digest', err);
+  }
+}
+
+/**
+ * The digest_queue tab by header name: how many rows follow the header (rows), and the
+ * lines among them that have a code (lines), each read back as a summary.
+ */
+function readQueue_(ss) {
+  const sheet = ss.getSheetByName(QUEUE_TAB);
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  const lastCol = sheet ? sheet.getLastColumn() : 0;
+  if (lastRow < 2 || lastCol < 1) return { sheet: sheet, rows: 0, lines: [] };
+  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const header = values[0].map(h => String(h).trim());
+  const cell = (line, name) => (header.indexOf(name) < 0 ? '' : String(line[header.indexOf(name)]).trim());
+  const lines = values.slice(1).filter(line => cell(line, 'code') !== '').map(line => {
+    const added = emptyCounts_();
+    Object.keys(added).forEach(name => {
+      added[name] = Number(cell(line, 'added_' + name)) || 0;
+    });
+    return {
+      code: cell(line, 'code').toUpperCase(),
+      mode: cell(line, 'mode'),
+      build: cell(line, 'build'),
+      start: cell(line, 'start'),
+      finish: cell(line, 'finish'),
+      added: added,
+    };
+  });
+  return { sheet: sheet, rows: lastRow - 1, lines: lines };
+}
+
+/** The digest email: one line per queued session, with each code's total rows as they are now, then the Sheet's link. */
+function digestEmail_(ss, lines) {
+  const totals = new Map();
+  Object.keys(MODE_PREFIX).forEach(mode => {
+    const codes = lines.filter(line => line.mode === mode).map(line => line.code);
+    if (codes.length > 0) totals.set(mode, codeTotals_(ss, mode, codes));
+  });
+  const text = lines.map(line => {
+    const total = totals.has(line.mode) ? totals.get(line.mode).get(line.code) : emptyCounts_();
+    return line.code + ' (' + line.mode + '); build ' + line.build +
+      '; start ' + (line.start || 'unknown') + '; finish ' + (line.finish || 'unknown') +
+      '; rows in the finishing post: ' + countsText_(line.added) + '; total rows for this code: ' + countsText_(total);
+  });
+  return {
+    subject: 'LOB digest: ' + lines.length + (lines.length === 1 ? ' session' : ' sessions') + ' finished',
+    body: text.concat(['', 'Sheet: ' + ss.getUrl()]).join('\n'),
+  };
+}
+
+/** Sends a plain-text email to email_to, or, when that is blank, to the deploying account. */
+function sendMail_(settings, email) {
+  const to = settings.to || Session.getEffectiveUser().getEmail();
+  if (!to) throw new Error('no recipient: email_to is blank and the account has no address');
+  MailApp.sendEmail({ to: to, subject: email.subject, body: email.body });
+}
+
+/**
+ * The settings, read afresh by every request that needs them (never cached), so an edit
+ * in the tab applies at once. A missing tab or key takes its default. A value the
+ * receiver cannot use is ignored and its key listed in ignored, which op=health shows
+ * (never the value): an unknown email_mode, or an email_to that is not one or more
+ * addresses, turns emails off; an unknown digest_minutes means 60.
+ */
+function readSettings_(ss) {
+  const sheet = ss.getSheetByName(SETTINGS_TAB);
+  const table = settingsTable_(sheet);
+  const ignored = [];
+  let mode = (table.get('email_mode') || 'off').toLowerCase();
+  if (EMAIL_MODES.indexOf(mode) < 0) {
+    ignored.push('email_mode');
+    mode = 'off';
+  }
+  const to = (table.get('email_to') || '').split(',').map(part => part.trim()).join(',');
+  if (to !== '' && !to.split(',').every(part => ADDRESS_RE.test(part))) {
+    ignored.push('email_to');
+    mode = 'off';
+  }
+  let minutes = Number(table.get('digest_minutes') || 60);
+  if (DIGEST_MINUTES.indexOf(minutes) < 0) {
+    ignored.push('digest_minutes');
+    minutes = 60;
+  }
+  return { present: Boolean(sheet), mode: mode, to: to, minutes: minutes, ignored: ignored };
+}
+
+/** The settings tab's rows as key to value text, columns "key" and "value" found by header name (any case). */
+function settingsTable_(sheet) {
+  const table = new Map();
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  const lastCol = sheet ? sheet.getLastColumn() : 0;
+  if (lastRow < 2 || lastCol < 1) return table;
+  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const header = values[0].map(h => String(h).trim().toLowerCase());
+  const keyCol = header.indexOf('key');
+  const valueCol = header.indexOf('value');
+  if (keyCol < 0 || valueCol < 0) return table;
+  values.slice(1).forEach(line => {
+    const key = String(line[keyCol]).trim().toLowerCase();
+    if (key !== '') table.set(key, String(line[valueCol]).trim());
+  });
+  return table;
+}
+
+/**
+ * Makes the settings tab with its defaults (email_mode off, email_to blank, digest_minutes
+ * 60), or adds any key missing from it. Values already there are never changed, so a
+ * second run changes nothing. Run it once from the script editor; that run is where Google
+ * asks for the new permissions (docs/apps-script-setup.md, Part 7).
+ */
+function setupSettings() {
+  const ss = spreadsheet_();
+  const table = settingsTable_(ss.getSheetByName(SETTINGS_TAB));
+  const missing = SETTING_DEFAULTS.filter(pair => !table.has(pair[0])).map(pair => ({ key: pair[0], value: pair[1] }));
+  if (missing.length > 0) writeTab_(ss, planTab_(ss, SETTINGS_TAB, missing));
+  const added = missing.map(setting => setting.key).join(', ');
+  console.log('settings: ' + (added ? 'added ' + added : 'nothing to add'));
+}
+
+/**
+ * Installs the time trigger that runs sendDigest() every digest_minutes, replacing any
+ * earlier one, so running it again (say, after digest_minutes changed) still leaves
+ * exactly one. Run it from the script editor before class.
+ */
+function installDigestTrigger() {
+  const settings = readSettings_(spreadsheet_());
+  removeDigestTrigger();
+  const clock = ScriptApp.newTrigger(DIGEST_FUNCTION).timeBased();
+  (settings.minutes < 60 ? clock.everyMinutes(settings.minutes) : clock.everyHours(settings.minutes / 60)).create();
+  console.log('digest trigger installed: every ' + settings.minutes + ' minutes' +
+    (settings.mode === 'digest' ? '' : '; email_mode is ' + settings.mode + ', so nothing is queued'));
+}
+
+/** Removes the sendDigest() trigger; with none installed it does nothing. Run it from the script editor after class. */
+function removeDigestTrigger() {
+  const triggers = ScriptApp.getProjectTriggers().filter(trigger => trigger.getHandlerFunction() === DIGEST_FUNCTION);
+  triggers.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+  console.log('digest triggers removed: ' + triggers.length);
+}
+
+/**
+ * The build label as the emails show it: letters, digits, spaces and . _ - only (any other
+ * character becomes ?), at most 60. It is the only text a post puts into an email, so a
+ * forged post cannot add an address, a link or a line to one.
+ */
+function emailBuild_(build) {
+  return String(build).replace(/[^A-Za-z0-9 ._-]/g, '?').slice(0, 60);
+}
+
+/** An ISO 8601 UTC time to the second, or '' when ms is not a valid time. */
+function isoAt_(ms) {
+  const date = new Date(ms);
+  return isFinite(date.getTime()) ? date.toISOString().replace(/\.\d{3}Z$/, 'Z') : '';
+}
+
+/**
+ * A failure in the email path (settings, mail, queue or digest): logged, never thrown into
+ * a post's reply. The log has the error kind and message, with any address masked.
+ */
+function emailFailed_(stage, err) {
+  const name = err && err.name ? err.name : 'Error';
+  const message = err && err.message ? String(err.message).replace(/[^\s@]+@[^\s@]+/g, '<address>').slice(0, 200) : '';
+  console.error('email failed (' + stage + '): ' + name + (message ? ': ' + message : ''));
 }
 
 /**

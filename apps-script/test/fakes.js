@@ -1,7 +1,8 @@
 'use strict';
 /*
  * In-memory stand-ins for the Apps Script services that Code.gs uses:
- * SpreadsheetApp, LockService, CacheService, ContentService and console.
+ * SpreadsheetApp, LockService, CacheService, ContentService, MailApp, ScriptApp,
+ * Session and console.
  *
  * They copy the real behaviour the script relies on:
  * - insertSheet() makes a 1000 x 26 sheet, and getRange() outside the sheet throws,
@@ -10,11 +11,17 @@
  * - a string is read the way Sheets reads typed input: a leading apostrophe forces
  *   text and is not stored, "=..." becomes a formula, numeric text becomes a number,
  *   and TRUE/FALSE become booleans;
- * - cache entries expire on a clock the tests control, and a TTL over 6 h throws.
+ * - cache entries expire on a clock the tests control, and a TTL over 6 h throws;
+ * - MailApp.sendEmail takes the message object form ({to, subject, body}) and keeps
+ *   what it would send; a time trigger runs every 1, 5, 10, 15 or 30 minutes or every
+ *   1, 2, 4, 6, 8 or 12 hours, and any other interval throws.
  */
 
 const NUMBER_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
 const MimeType = Object.freeze({ JSON: 'application/json', TEXT: 'text/plain' });
+// Placeholders on the reserved example.com domain: no real account or address.
+const DEPLOYER = 'deployer@example.com'; // Session.getEffectiveUser().getEmail()
+const SHEET_URL = 'https://docs.google.com/spreadsheets/d/fake-sheet-id/edit';
 
 class FakeSpreadsheet {
   constructor() {
@@ -48,6 +55,10 @@ class FakeSpreadsheet {
 
   getSheets() {
     return this.sheets.slice();
+  }
+
+  getUrl() {
+    return SHEET_URL;
   }
 
   // Test helper.
@@ -106,6 +117,16 @@ class FakeSheet {
       if (line && afterPosition < line.length) line.splice(afterPosition, 0, ...new Array(howMany).fill(''));
     });
     this.maxColumns += howMany;
+    return this;
+  }
+
+  deleteRows(rowPosition, howMany) {
+    this.spreadsheet.fault('deleteRows');
+    checkPosition(rowPosition, this.maxRows, howMany);
+    if (rowPosition + howMany - 1 > this.maxRows) throw new Error('Exception: Those rows are out of bounds.');
+    if (howMany >= this.maxRows) throw new Error('Exception: Sorry, it is not possible to delete all non-frozen rows.');
+    this.grid.splice(rowPosition - 1, howMany);
+    this.maxRows -= howMany;
     return this;
   }
 
@@ -292,12 +313,91 @@ class FakeTextOutput {
   }
 }
 
+class FakeMailApp {
+  constructor() {
+    this.sent = []; // { to, subject, body } per email sent
+    this.failWith = null; // a message: the next sendEmail throws it once, to simulate a mail failure
+    this.onSend = null; // runs inside sendEmail, before it sends or fails
+  }
+
+  sendEmail(message) {
+    if (this.onSend) this.onSend(message);
+    if (this.failWith !== null) {
+      const text = this.failWith;
+      this.failWith = null;
+      throw new Error('Exception: ' + text);
+    }
+    if (!message || typeof message.to !== 'string' || message.to === '' ||
+      typeof message.subject !== 'string' || typeof message.body !== 'string') {
+      throw new Error('Exception: Invalid argument: message');
+    }
+    this.sent.push({ to: message.to, subject: message.subject, body: message.body });
+  }
+}
+
+class FakeTrigger {
+  constructor(id, handler, every) {
+    this.id = id;
+    this.handler = handler;
+    this.every = every; // "15 minutes" or "1 hours": the test's view of the schedule
+  }
+
+  getUniqueId() {
+    return this.id;
+  }
+
+  getHandlerFunction() {
+    return this.handler;
+  }
+}
+
+class FakeScriptApp {
+  constructor() {
+    this.triggers = [];
+    this.nextId = 1;
+  }
+
+  newTrigger(functionName) {
+    const app = this;
+    let every = null;
+    const clock = {
+      everyMinutes(n) {
+        if ([1, 5, 10, 15, 30].indexOf(n) < 0) throw new Error('Exception: Invalid argument: everyMinutes');
+        every = n + ' minutes';
+        return clock;
+      },
+      everyHours(n) {
+        if ([1, 2, 4, 6, 8, 12].indexOf(n) < 0) throw new Error('Exception: Invalid argument: everyHours');
+        every = n + ' hours';
+        return clock;
+      },
+      create() {
+        if (every === null) throw new Error('Exception: The trigger needs a schedule.');
+        const trigger = new FakeTrigger(String(app.nextId++), functionName, every);
+        app.triggers.push(trigger);
+        return trigger;
+      },
+    };
+    return { timeBased: () => clock };
+  }
+
+  getProjectTriggers() {
+    return this.triggers.slice();
+  }
+
+  deleteTrigger(trigger) {
+    this.triggers = this.triggers.filter(t => t !== trigger);
+  }
+}
+
 /** Fresh fakes for one test. options.unbound makes getActiveSpreadsheet() return null. */
 function createServices(options = {}) {
   const clock = { now: Date.UTC(2026, 9, 28, 19, 0, 0) };
   const spreadsheet = new FakeSpreadsheet();
   const cache = new FakeCache(clock);
   const locks = new FakeLockService();
+  const mail = new FakeMailApp();
+  const scriptApp = new FakeScriptApp();
   const logs = [];
   const stats = { flushes: 0 };
   const capture = level => (...args) => {
@@ -313,9 +413,12 @@ function createServices(options = {}) {
     LockService: locks,
     CacheService: { getScriptCache: () => cache },
     ContentService: { MimeType, createTextOutput: (content = '') => new FakeTextOutput(content) },
+    MailApp: mail,
+    ScriptApp: scriptApp,
+    Session: { getEffectiveUser: () => ({ getEmail: () => DEPLOYER }) },
     console: { log: capture('log'), info: capture('info'), warn: capture('warn'), error: capture('error') },
   };
-  return { globals, spreadsheet, cache, locks, logs, clock, stats };
+  return { globals, spreadsheet, cache, locks, mail, scriptApp, logs, clock, stats };
 }
 
 function isFilled(value) {
@@ -351,4 +454,4 @@ function toStored(value, onFormula) {
   throw new Error('Exception: Cannot write a value of type ' + typeof value + ' to a cell.');
 }
 
-module.exports = { createServices, MimeType };
+module.exports = { createServices, MimeType, DEPLOYER, SHEET_URL };
