@@ -235,11 +235,12 @@ function share(n, total) {
 
 function describeError(err) {
   const cause = err && err.cause;
-  return String((cause && (cause.code || cause.message)) || (err && err.message) || err);
+  return oneLine((cause && (cause.code || cause.message)) || (err && err.message) || err);
 }
 
+// Printed replies mask long tokens: a Google error page could quote the deployment id.
 function oneLine(text) {
-  const flat = String(text).replace(/\s+/g, ' ').trim();
+  const flat = String(text).replace(/\s+/g, ' ').replace(/[A-Za-z0-9_-]{40,}/g, '<id>').trim();
   return flat.length > 300 ? flat.slice(0, 300) + '...' : flat;
 }
 
