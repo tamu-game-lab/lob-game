@@ -11,16 +11,23 @@
  * four kinds in turn), each repeating the post's fields. Posts are text/plain JSON.
  *
  * In each round every client posts at the same moment; the next round starts when all
- * are done. A post is retried as the game retries (docs/data-dictionary.md): after a
- * busy or server reply, an HTTP error or no reply, waiting 5 s doubling to a 5 min cap,
- * times 0.5-1.5, for at most 5 tries. A reply with retry:false is a failure at once.
+ * are done. A post is retried as the game retries since W3 (docs/data-dictionary.md):
+ * after a busy or server reply, any other ok:false without retry:false, an HTTP error,
+ * a reply that is not JSON, or no reply within the game's 20 s request timeout, it
+ * waits 5 s doubling, times 0.5-1.5, never more than 20 s, and resends the same batch.
+ * It stops at once at a reply with retry:false, whose rows the game keeps for
+ * "Download my data". The game never gives up; this run gives up on a post 10 minutes
+ * after its first try.
  *
- * It prints the latency per post (first try to final reply: p50, p95, max), the
- * retries, each failure with the server's reply, and the rows acknowledged. A good
- * result has no failures and a p95 under 8 s, the game's wait at Finish session.
+ * It prints the latency per post (first try to final reply: p50, p95, max), the retries
+ * by reason, the posts acknowledged within 120 s of their first try, the rows
+ * acknowledged, and any loss: each post never acknowledged, with the receiver's last
+ * reply. A good result has no loss and every post acknowledged within 120 s, before the
+ * game may offer "Download my data" to a player who pressed Finish session.
  *
  * Safety: it posts only to a https://script.google.com/macros/s/<id>/exec URL and only
- * in test mode, so its rows go to the test_ tabs, with the build label "load-test".
+ * in test mode, so its rows go to the test_ tabs, with the build label "load-test". It
+ * never prints the URL.
  */
 
 const crypto = require('crypto');
@@ -32,9 +39,9 @@ const EXEC_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exe
 const MODE = 'test'; // never study or tryout
 const BUILD = 'load-test';
 const ROWS_PER_POST = 20;
-const MAX_TRIES = 5;
-const REQUEST_TIMEOUT_MS = 60000;
-const FINISH_WAIT_MS = 8000; // how long the game waits for its last post at Finish session
+const REQUEST_TIMEOUT_MS = 20000; // the game's request timeout (AppsScriptSink)
+const GIVE_UP_MS = 600000; // the game never gives up; this run stops retrying a post after 10 min
+const OFFER_S = 120; // the game's wait after Finish before it may offer "Download my data" (WO-98)
 const POST_FIELDS = ['schema', 'mode', 'build', 'code', 'session'];
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'client_post_w1.json'), 'utf8'));
 
@@ -81,15 +88,20 @@ async function send(url, client, round) {
   for (let tries = 1; ; tries++) {
     post.sent_at = stamp(new Date());
     const last = await tryPost(url, post);
-    if (last.result !== 'retry' || tries === MAX_TRIES) {
-      return { code: client.code, round: round, ms: performance.now() - started, tries: tries, retries: retries, last: last };
+    const ms = performance.now() - started;
+    const result = { code: client.code, round: round, ms: ms, tries: tries, retries: retries, last: last };
+    if (last.result !== 'retry') return result;
+    const wait = backoffMs(tries - 1);
+    if (ms + wait > GIVE_UP_MS) {
+      result.last = { result: 'gave up', reason: last.reason, reply: last.reply };
+      return result;
     }
     retries.push(last.reason);
-    await sleep(backoffMs(tries - 1));
+    await sleep(wait);
   }
 }
 
-/** One HTTP try. result is 'ok' (acknowledged), 'failed' (retry:false) or 'retry'. */
+/** One HTTP try. result is 'ok' (acknowledged), 'refused' (retry:false) or 'retry'. */
 async function tryPost(url, post) {
   if (post.mode !== MODE || post.rows.some(row => row.mode !== MODE)) throw new Error('refused: only test mode is sent');
   let status;
@@ -104,7 +116,7 @@ async function tryPost(url, post) {
     status = response.status;
     text = await response.text();
   } catch (err) {
-    return { result: 'retry', reason: 'network', reply: describeError(err) };
+    return { result: 'retry', reason: err && err.name === 'TimeoutError' ? 'timeout' : 'network', reply: describeError(err) };
   }
   let reply = null;
   try {
@@ -115,34 +127,36 @@ async function tryPost(url, post) {
   if (status < 200 || status > 299) return { result: 'retry', reason: 'http ' + status, reply: 'HTTP ' + status + ' ' + oneLine(text) };
   if (!reply || typeof reply !== 'object') return { result: 'retry', reason: 'not json', reply: 'HTTP ' + status + ' ' + oneLine(text) };
   if (reply.ok === true) return { result: 'ok', duplicate: reply.duplicate === true, reply: oneLine(text) };
-  if (reply.retry === false) return { result: 'failed', reason: String(reply.error), reply: oneLine(text) };
+  if (reply.retry === false) return { result: 'refused', reason: String(reply.error), reply: oneLine(text) };
   return { result: 'retry', reason: typeof reply.error === 'string' ? reply.error : 'not ok', reply: oneLine(text) };
 }
 
 function report(results, rowsSent) {
   const ms = results.map(r => r.ms).sort((a, b) => a - b);
-  const p95 = percentile(ms, 95);
   const reasons = new Map();
   results.forEach(r => r.retries.forEach(reason => reasons.set(reason, (reasons.get(reason) || 0) + 1)));
   const retries = results.reduce((n, r) => n + r.retries.length, 0);
   const acked = results.filter(r => r.last.result === 'ok');
   const duplicates = acked.filter(r => r.last.duplicate).length;
-  const failures = results.filter(r => r.last.result !== 'ok');
+  const inTime = acked.filter(r => r.ms <= OFFER_S * 1000).length;
+  const lost = results.filter(r => r.last.result !== 'ok');
 
   console.log('');
   console.log('latency per post, first try to final reply: p50 ' + seconds(percentile(ms, 50)) +
-    ', p95 ' + seconds(p95) + ', max ' + seconds(ms[ms.length - 1]));
+    ', p95 ' + seconds(percentile(ms, 95)) + ', max ' + seconds(ms[ms.length - 1]));
   console.log('retries: ' + retries +
     (retries > 0 ? ' (' + Array.from(reasons, ([reason, n]) => reason + ' ' + n).join(', ') + ')' : ''));
-  console.log('failures: ' + failures.length);
-  failures.slice(0, 20).forEach(r => {
-    console.log('  ' + r.code + ' post ' + r.round + ', ' + r.tries + (r.tries === 1 ? ' try' : ' tries') + ': ' + r.last.reply);
-  });
-  if (failures.length > 20) console.log('  ... and ' + (failures.length - 20) + ' more');
+  console.log('posts acknowledged within ' + OFFER_S + ' s of their first try: ' + inTime + ' of ' + results.length);
   console.log('rows acknowledged: ' + acked.length * ROWS_PER_POST + ' of ' + rowsSent +
     (duplicates > 0 ? ' (' + duplicates + ' of the posts as duplicates: an earlier try had been stored)' : ''));
-  const good = failures.length === 0 && p95 < FINISH_WAIT_MS;
-  console.log('result: ' + (good ? 'good' : 'NOT good') + ' (wanted: no failures, and p95 under the game\'s 8 s Finish wait)');
+  console.log('loss: ' + lost.length * ROWS_PER_POST + ' rows');
+  lost.slice(0, 20).forEach(r => {
+    console.log('  ' + r.code + ' post ' + r.round + ', ' + r.tries + (r.tries === 1 ? ' try' : ' tries') + ', ' + r.last.result + ': ' + r.last.reply);
+  });
+  if (lost.length > 20) console.log('  ... and ' + (lost.length - 20) + ' more');
+  const good = lost.length === 0 && inTime === results.length;
+  console.log('result: ' + (good ? 'good' : 'NOT good') + ' (wanted: no loss, and every post acknowledged within ' + OFFER_S +
+    ' s, before the game may offer "Download my data" at Finish)');
   process.exitCode = good ? 0 : 1;
 }
 
@@ -183,9 +197,9 @@ function count(text, name, fallback, max) {
   return n >= 1 && n <= max ? n : null;
 }
 
-/** The game's wait before retry `attempt` (0 first): 5 s doubling to a 5 min cap, times 0.5-1.5. */
+/** The game's wait before retry `attempt` (0 first) since W3: 5 s doubling, times 0.5-1.5, never more than 20 s. */
 function backoffMs(attempt) {
-  return Math.min(5 * Math.pow(2, attempt), 300) * (0.5 + Math.random()) * 1000;
+  return Math.min(Math.min(5 * Math.pow(2, attempt), 20) * (0.5 + Math.random()), 20) * 1000;
 }
 
 function percentile(sorted, p) {
@@ -195,11 +209,12 @@ function percentile(sorted, p) {
 function describeError(err) {
   if (err && err.name === 'TimeoutError') return 'no reply within ' + REQUEST_TIMEOUT_MS / 1000 + ' s';
   const cause = err && err.cause;
-  return String((cause && (cause.code || cause.message)) || (err && err.message) || err);
+  return oneLine((cause && (cause.code || cause.message)) || (err && err.message) || err);
 }
 
+// Printed replies mask long tokens: a Google error page could quote the deployment id.
 function oneLine(text) {
-  const flat = String(text).replace(/\s+/g, ' ').trim();
+  const flat = String(text).replace(/\s+/g, ' ').replace(/[A-Za-z0-9_-]{40,}/g, '<id>').trim();
   return flat.length > 300 ? flat.slice(0, 300) + '...' : flat;
 }
 

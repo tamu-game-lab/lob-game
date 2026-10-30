@@ -76,9 +76,9 @@ In a terminal in the repository folder, run it with your `/exec` URL from step 2
 node apps-script/test/load-test.js https://script.google.com/macros/s/AKfy...xyz/exec
 ```
 
-It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same moment in each round. It sends test data only (codes T900 to T999), so its rows go to the `test_` tabs, which you may delete afterwards. It never finishes a session, so it sends no session emails (Part 7). A good result:
-- `failures: 0`;
-- a `p95` under 8 seconds, how long the game waits for its last post when a player presses Finish session.
+It simulates 40 players who each send 3 posts of 20 rows, all 40 at the same moment in each round, and resends a post the way the game does. It sends test data only (codes T900 to T999), so its rows go to the `test_` tabs, which you may delete afterwards. It never finishes a session, so it sends no session emails (Part 7). A good result, which it prints as `result: good`:
+- `loss: 0 rows`;
+- every post acknowledged within 120 seconds (`posts acknowledged within 120 s` counts all of them), before the game may offer "Download my data" to a player who pressed Finish session.
 
 ## Part 6: Connect the game
 
