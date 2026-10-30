@@ -10,11 +10,12 @@ Rules:
 ## 1. How data travels
 - **The client.** The game (`PlaytestService`) queues rows and posts them in batches: about once a minute, at every run end, and at Finish session.
   - Each post is one HTTP POST of JSON with `Content-Type: text/plain;charset=utf-8`, so the browser sends no CORS preflight.
-  - Posts never block play. A failed post is retried with exponential backoff and jitter: 5 s doubling to a 5 min cap, times 0.5-1.5.
-  - On the Web, pending rows are kept in the browser's local storage, so they survive a page reload. The queue is persisted only when dirty; a failed write keeps it dirty for retry.
+  - Posts never block play. A post that gets no reply, an HTTP error or any reply but `ok:true` is resent with the same batch id after an exponential backoff with jitter: 5 s doubling, times 0.5-1.5, never more than 20 s (before W3, a 5 min cap). Only a `retry:false` reply stops the resending (see "Server reply").
+  - From W3 (WO-98), Finish session never waits for the receiver: it queues the finish row, asks for a send at once and returns. The queue keeps sending in the background while the Finish screen counts the posts sent. "Download my data" appears only when rows are still unsent 120 s or more after Finish and the latest try failed (or the receiver refused them), and never within 20 s of a post the receiver acknowledged; a later acknowledgment withdraws it.
+  - On the Web, pending rows are kept in the browser's local storage (`lob_pt_queue_v1`, section 11), so they survive a page reload. The queue is persisted only when dirty; a failed write keeps it dirty for retry.
   - On `pagehide`, the Web page sends the next unsent batch with `navigator.sendBeacon` as `text/plain`, unless its UTF-8 JSON exceeds 60 KB. C# refreshes the page's endpoint and batch JSON at most once a second when the batch changes. The beacon uses the same batch id as the queued POST, so the server deduplicates it; the client retains the rows until a POST is acknowledged.
-  - A sending mode with a blank endpoint retains pending rows for "Download my data" without acknowledging them or making a network call. The download contains only the current session's rows.
-- **The sinks.** In the Editor and the Windows build, the same rows go to a local JSONL file instead of the network (`<persistentDataPath>/Playtest/session_<session>.jsonl`). `?mode=off` sends and writes nothing.
+  - A sending mode with a blank endpoint retains pending rows for "Download my data" without acknowledging them or making a network call, and offers the download at once at Finish. The download contains only the current session's rows.
+- **The sinks.** In the Editor and the Windows build, the same rows go to a local JSONL file instead of the network (`<persistentDataPath>/Playtest/session_<session>.jsonl`). `?mode=off` sends nothing and writes no rows, but still keeps local progress and settings (section 11).
 - **The server.** The Google Apps Script web app (`apps-script/Code.gs` in the release repo):
   - validates each post;
   - ignores a batch id it has already appended, so retries never duplicate rows;
@@ -41,7 +42,8 @@ At most 100 rows and 200 KB per post.
 - `{"ok":true,"appended":N}`: done.
 - `{"ok":true,"appended":0,"duplicate":true}`: a retry of a batch already stored.
 - `{"ok":false,"error":"<reason>","retry":false}`: invalid; the client drops the batch into the "Download my data" file rather than retrying forever.
-- `{"ok":false,"error":"busy","retry":true}`: try again later.
+- `{"ok":false,"error":"busy"|"server","retry":true}`: try again later.
+- The client retries any other reply like `busy`: an `ok:false` without `retry:false`, or a page that is not the receiver's JSON.
 
 ### doGet
 - `?op=health` returns `{"ok":true,"schema":1,"script":"<script version>","time":"<ISO>"}`.
@@ -52,14 +54,14 @@ At most 100 rows and 200 KB per post.
 |---|---|---|---|
 | (none) | tryout | `tryout_*` tabs | any well-formed code passes |
 | `?mode=study` | study | `sessions`, `progress`, `runs`, `events`; unknown codes to `unmatched` | the server checks the code; an unknown one asks the player to recheck |
-| `?mode=off` | off | nothing is sent or written | any well-formed code passes |
+| `?mode=off` | off | no rows are sent or written; local progress is still kept (section 11) | any well-formed code passes |
 | `?mode=test` | test | `test_*` tabs (automated smoke test only; not linked anywhere) | any well-formed code passes |
 
 - The `mode` key is case-insensitive. Unrecognized mode values are refused on the ID screen.
 - `?id=P042` prefills the code only when the full value normalizes to a valid code, so a pre-test can hand off to the game.
 - `?fps=1` shows a frame counter. It is not data.
 - Tryout data is never research data (SR49): tryout and test tabs are for usability work only.
-- Local intro-seen, visited and concept-progress state is keyed by both mode and code; concept progress uses `lob.map.v1.<mode>.<CODE>`. Tryout completion never unlocks study content.
+- Local intro-seen, visited, concept-progress, started and flow-step state is keyed by both mode and code; concept progress uses `lob.map.v1.<mode>.<CODE>` (section 11 lists every key). Tryout completion never unlocks study content.
 - Save ownership is stored separately from the unchanged save format under `lob.save.owner` and `lob.run.owner`. Continue is offered only to the owning code; a legacy slot without an owner remains available to any code.
 
 ## 3. Study code
@@ -141,7 +143,7 @@ Lesson event types:
 - `intro_view` (`detail`: `{"part":"crews"}` …);
 - `intro_skip`;
 - `task_attempt` (`detail`: `{"node":"bar_chart","correct":false}`);
-- `audio_change` (`detail`: `{"volume":0.6}`).
+- `audio_change` (`detail`: `{"mode":"full|background|off","volume":n}`, for example `{"mode":"background","volume":0.6}`): the main screen's Audio setting (SIM.L15) and master volume, logged when either changes. Before W3 the detail held only `volume`.
 
 ## 9. Change log
 | Schema | Date | Change |
@@ -152,3 +154,19 @@ Lesson event types:
 Receiver 1.1.0 (the SR49 amendment, session emails) adds two admin tabs. They hold no play data, so the schema stays 1:
 - `settings` (`key`, `value`): `email_mode` (`off`, `session` or `digest`), `email_to` (blank: the deploying account) and `digest_minutes`. `setupSettings()` makes it (`docs/apps-script-setup.md`, Part 7). Once it exists, `?op=health` also returns `email`, the mode in effect, and lists any setting it could not use under `ignored_settings` (keys only).
 - `digest_queue`: in digest mode, one line per finished session until the next digest email sends and deletes it: `code`, `mode`, `build`, `start`, `finish`, the finishing post's rows per tab (`added_sessions` to `added_unmatched`) and `queued_at`.
+
+## 11. Browser storage
+The game keeps these keys in the browser's local storage (in the Editor and the Windows build, as files under `<persistentDataPath>/Playtest/`). Each holds only local progress, a setting or rows waiting to be sent, never names or free text; a code in them is the study code.
+
+| Key | Holds |
+|---|---|
+| `lob_pt_session_v1` | The current session (code, mode, build, session id, start time, next `row_seq` and its finish row's counts), so a reload can resume it (section 4), and the mode-and-code pairs that have visited or seen the intro. |
+| `lob_pt_queue_v1` | Each session's rows the receiver has not acknowledged yet, so a reload resumes sending; "Download my data" exports them. |
+| `lob.map.v1.<mode>.<CODE>` | The concept-map nodes this code has completed in this mode. |
+| `lob.map.v1.started.<mode>.<CODE>` | The nodes this code has opened in this mode, done or not (SR52). |
+| `lob.flow.v1.<mode>.<CODE>` | The step of the opening flow (SR51) this code has reached in this mode, so a return resumes there. |
+| `lob_audio_mode_v1` | The Audio setting: `full`, `background` or `off` (SIM.L15). |
+| `lob_master_volume_v1` | The master volume, from 0 to 1. |
+| `lob.save.owner`, `lob.run.owner` | The code that owns the saved game or the saved run (section 2). |
+
+`?mode=off` sends nothing and writes neither `lob_pt_session_v1` nor `lob_pt_queue_v1`, but still keeps local progress (under the mode `off`) and the audio settings. Unity itself keeps the saved game and the saved run, and two game preferences (`lob.tutorial5_complete`, `lob_project_last_failed_site`), in the browser's IndexedDB: game state only.

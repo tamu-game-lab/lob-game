@@ -118,6 +118,8 @@ Google lets a script in a personal account email at most 100 recipients a day, a
 34. During class, each hour in which sessions finish brings one email that lists them, one line per session. They wait in the `digest_queue` tab until then, and each email deletes the lines it listed. An hour in which no session finishes sends nothing. One email lists at most 200 sessions; any more wait for the next one.
 35. After class, choose **sendDigest** and click **Run** to send what is still waiting, then choose **removeDigestTrigger** and click **Run**. Set `email_mode` back to `off` or `session`.
 
+**When the class finishes together.** The W2.1 load tests showed what to expect. When 40 posts arrive at the same moment, they clear in about 75 s, because the receiver writes one post at a time; the others wait their turn or are sent again, and none is lost. When 40 simulated players pressed Finish session at the same moment, every finish was acknowledged within 120 s, with no loss. From W3 the game no longer waits at Finish session: it moves on at once, keeps sending in the background, and offers "Download my data" only if sending still fails 120 s later.
+
 Good to know:
 - A post that the game sends again (a retry) sends no second email and adds no second line. The rare exception is a copy that arrives more than six hours later: like its rows, it is taken as new.
 - If an email cannot be sent (for example, after Google's daily email limit), the play data is still stored. The failure shows under **Executions** with no play data in it, and in digest mode the lines stay in `digest_queue` for the next run.
