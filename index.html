@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0b1220">
+    <meta name="description" content="Line of Balance: an educational construction-scheduling game.">
+    <title>Line of Balance</title>
+    <link rel="icon" type="image/svg+xml" href="TemplateData/favicon.svg">
+    <link rel="stylesheet" href="TemplateData/style.css">
+  </head>
+  <body>
+    <div id="lob-app">
+      <main id="unity-container">
+        <canvas id="unity-canvas" width=960 height=600 tabindex="-1" role="application" aria-label="Line of Balance game"></canvas>
+
+        <div id="lob-overlay">
+          <section id="lob-device-notice" class="lob-panel" aria-labelledby="lob-device-notice-title" hidden>
+            <img class="lob-mark" src="TemplateData/favicon.svg" alt="" width="56" height="56">
+            <h1 id="lob-device-notice-title" class="lob-title">Line of Balance</h1>
+            <p class="lob-message">This game needs a laptop or desktop computer with a mouse.</p>
+            <button type="button" id="lob-load-anyway" class="lob-link-button">Load anyway</button>
+          </section>
+
+          <section id="unity-loading-bar" class="lob-panel" aria-labelledby="lob-loading-title" hidden>
+            <img class="lob-mark" src="TemplateData/favicon.svg" alt="" width="56" height="56">
+            <h1 id="lob-loading-title" class="lob-title">Line of Balance</h1>
+            <div id="unity-progress-bar-empty" role="progressbar" aria-label="Loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="unity-progress-bar-full"></div>
+            </div>
+            <div class="lob-progress-row">
+              <span id="lob-loading-status" role="status">Downloading the game&hellip;</span>
+              <span id="lob-loading-percent" aria-hidden="true">0%</span>
+            </div>
+          </section>
+
+          <section id="lob-error" class="lob-panel lob-panel--error" role="alert" aria-labelledby="lob-error-title" hidden>
+            <h1 id="lob-error-title" class="lob-title">The game could not load</h1>
+            <p class="lob-message">Please use an up-to-date Chrome, Edge or Firefox on a laptop or desktop computer, then reload this page.</p>
+            <p class="lob-error-label">Error details</p>
+            <pre id="lob-error-text" class="lob-error-text"></pre>
+            <button type="button" id="lob-reload" class="lob-button">Reload page</button>
+          </section>
+        </div>
+
+        <div id="unity-warning" aria-live="polite"></div>
+      </main>
+
+      <footer id="unity-footer">
+        <span id="unity-build-title">Line of Balance</span>
+        <span id="lob-version">v1.3-W3</span>
+        <span class="lob-footer-spacer"></span>
+        <button type="button" id="unity-fullscreen-button" class="lob-footer-button" autocomplete="off" disabled>
+          <svg class="lob-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Full screen</span>
+        </button>
+      </footer>
+    </div>
+
+    <noscript><div class="lob-noscript">Line of Balance needs JavaScript. Please turn it on, or use Chrome, Edge or Firefox on a laptop or desktop computer.</div></noscript>
+
+    <script>
+      // Line of Balance - Unity 6000.3 WebGL template, built from Unity's Default template.
+      // Unity preprocesses this file at build time: keep its template expressions and the
+      // preprocessor lines exactly as they are. Plain ES5 on purpose, so that old browsers
+      // still reach the error panel instead of failing silently.
+      (function () {
+        "use strict";
+
+        // The bridge holds the next reserved POST, including its persisted batch id.
+        // A beacon never acknowledges it: a reload retries that same id for server dedup.
+        window.addEventListener("pagehide", function () {
+          var next = window["lobNextPlaytestBatch"];
+          if (!next || !navigator.sendBeacon) return;
+          try {
+            var body = new Blob([next.json], { type: "text/plain;charset=utf-8" });
+            if (body.size > 60 * 1024) return;
+            navigator.sendBeacon(next.endpoint, body);
+          } catch (error) {
+            // The durable queue remains available for the next normal POST.
+          }
+        });
+
+        var canvas = document.querySelector("#unity-canvas");
+        var overlay = document.querySelector("#lob-overlay");
+        var deviceNotice = document.querySelector("#lob-device-notice");
+        var loadAnywayButton = document.querySelector("#lob-load-anyway");
+        var loadingBar = document.querySelector("#unity-loading-bar");
+        var progressBar = document.querySelector("#unity-progress-bar-empty");
+        var progressBarFull = document.querySelector("#unity-progress-bar-full");
+        var loadingStatus = document.querySelector("#lob-loading-status");
+        var loadingPercent = document.querySelector("#lob-loading-percent");
+        var errorPanel = document.querySelector("#lob-error");
+        var errorText = document.querySelector("#lob-error-text");
+        var reloadButton = document.querySelector("#lob-reload");
+        var warningBanner = document.querySelector("#unity-warning");
+        var fullscreenButton = document.querySelector("#unity-fullscreen-button");
+        fullscreenButton.disabled = true;
+
+        var started = false;   // the Unity loader has been requested
+        var ready = false;     // createUnityInstance() has resolved
+        var failed = false;    // the error panel is showing
+        var shownProgress = 0;
+
+        // Page state for styling and automated checks: notice | loading | ready | error.
+        function setState(state) {
+          document.documentElement.setAttribute("data-lob-state", state);
+        }
+
+        // ---- Messages ---------------------------------------------------------
+
+        // Unity messages are plain text or simple HTML (<br>, <a>). Show them as text only,
+        // so nothing from an error string is ever parsed as markup.
+        function plainText(message) {
+          var text;
+          if (message === null || message === undefined) text = "";
+          else if (typeof message === "string") text = message;
+          else if (message instanceof Error) text = String(message);
+          else if (message.message) text = String(message.message);
+          else text = String(message);
+          text = text.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]*>/g, "");
+          text = text.replace(/^\s+|\s+$/g, "");
+          return text || "Unknown error.";
+        }
+
+        function showError(message) {
+          var text = plainText(message);
+          if (failed) {
+            // Keep the first (root-cause) error on screen; later ones go to the console.
+            if (window.console) console.error(text);
+            return;
+          }
+          failed = true;
+          setState("error");
+          overlay.hidden = false;
+          deviceNotice.hidden = true;
+          loadingBar.hidden = true;
+          errorText.textContent = text;
+          errorPanel.hidden = false;
+        }
+
+        function addBanner(text, type) {
+          var kind = (type === "error" || type === "warning") ? type : "info";
+          var item = document.createElement("div");
+          var body = document.createElement("div");
+          var close = document.createElement("button");
+          var timer = 0;
+
+          function dismiss() {
+            if (timer) clearTimeout(timer);
+            if (item.parentNode) item.parentNode.removeChild(item);
+          }
+
+          item.className = "lob-banner lob-banner--" + kind;
+          body.className = "lob-banner__text";
+          body.textContent = text;
+          close.type = "button";
+          close.className = "lob-banner__close";
+          close.setAttribute("aria-label", "Dismiss message");
+          close.textContent = "\u00d7";
+          close.addEventListener("click", dismiss);
+          item.appendChild(body);
+          item.appendChild(close);
+          warningBanner.appendChild(item);
+          // Errors stay until dismissed; info and warnings also clear themselves, as in Unity's Default template.
+          if (kind !== "error") timer = setTimeout(dismiss, 10000);
+        }
+
+        // config.showBanner: Unity calls this for non-fatal warnings and for errors.
+        function unityShowBanner(message, type) {
+          // An error before the game is running means loading failed. The loader does not
+          // always reject its promise in that case (for example when the framework file
+          // cannot be downloaded), so switch to the error panel here.
+          if (type === "error" && !ready) {
+            showError(message);
+            return;
+          }
+          addBanner(plainText(message), type);
+        }
+
+        // ---- Phones and tablets -----------------------------------------------
+
+        function mediaMatches(query) {
+          return !!(window.matchMedia && window.matchMedia(query).matches);
+        }
+
+        function isTouchFirstDevice() {
+          var ua = navigator.userAgent || "";
+          // A finger is the main pointer and there is no mouse, trackpad or pen at all.
+          var coarseOnly = mediaMatches("(pointer: coarse)") && !mediaMatches("(any-pointer: fine)");
+          // Mobile browsers, plus Chromium's user-agent client hint.
+          var mobileAgent = /Android|iPhone|iPad|iPod|Mobile|Silk|Kindle|BlackBerry|BB10|Opera Mini|IEMobile|Windows Phone|webOS/i.test(ua) ||
+            !!(navigator.userAgentData && navigator.userAgentData.mobile);
+          // iPadOS asks for desktop sites by default and then reports a Mac user agent;
+          // real Macs have no touch screen.
+          var iPadDesktopMode = /Macintosh/i.test(ua) && navigator.maxTouchPoints > 1;
+          return coarseOnly || mobileAgent || iPadDesktopMode;
+        }
+
+        // ---- Keyboard, wheel and mouse over the game --------------------------
+
+        var KEY_CODES = { 8: "Backspace", 9: "Tab", 32: " ", 33: "PageUp", 34: "PageDown", 35: "End", 36: "Home", 37: "ArrowLeft", 38: "ArrowUp", 39: "ArrowRight", 40: "ArrowDown" };
+        var LEGACY_KEYS = { "Spacebar": " ", "Left": "ArrowLeft", "Up": "ArrowUp", "Right": "ArrowRight", "Down": "ArrowDown" };
+        var NAVIGATION_KEYS = { "Tab": true, "Backspace": true, "PageUp": true, "PageDown": true, "Home": true, "End": true, "ArrowLeft": true, "ArrowUp": true, "ArrowRight": true, "ArrowDown": true };
+
+        function keyName(e) {
+          var key = e.key || KEY_CODES[e.keyCode] || "";
+          return LEGACY_KEYS.hasOwnProperty(key) ? LEGACY_KEYS[key] : key;
+        }
+
+        // While the game has focus, stop the browser from scrolling, moving focus or going
+        // back in history. Function keys (F5, F11) and every other Ctrl/Cmd shortcut
+        // (Ctrl/Cmd+R and so on) are never touched.
+        canvas.addEventListener("keydown", function (e) {
+          var key = keyName(e);
+          if (!NAVIGATION_KEYS.hasOwnProperty(key)) return;
+          // Arrows are always blocked: Alt+Left/Right and Cmd+Left/Right are Back/Forward.
+          // Other keys keep their Ctrl/Cmd combinations (Ctrl+Tab and Ctrl+PageDown switch tabs).
+          if (key.indexOf("Arrow") !== 0 && (e.ctrlKey || e.metaKey)) return;
+          e.preventDefault();
+        });
+
+        // Space is cancelled on keypress, not keydown. Cancelling keydown would also stop the
+        // keypress event that Unity reads typed characters from, so players could not type a
+        // space into in-game text fields. The browser's Space action happens on keypress.
+        canvas.addEventListener("keypress", function (e) {
+          var isSpace = e.key === " " || e.key === "Spacebar" || e.charCode === 32;
+          if (isSpace && !e.ctrlKey && !e.metaKey) e.preventDefault();
+        });
+
+        canvas.addEventListener("wheel", function (e) {
+          e.preventDefault();
+        }, { passive: false });
+
+        canvas.addEventListener("contextmenu", function (e) {
+          e.preventDefault();
+        });
+
+        function focusCanvas() {
+          if (document.activeElement !== canvas) canvas.focus();
+        }
+
+        canvas.addEventListener("pointerdown", focusCanvas);
+
+        // ---- Unity loader (as in Unity 6000.3's Default template) -------------
+
+        var buildUrl = "Build";
+        var loaderUrl = buildUrl + "/Web_W3.loader.js";
+        var config = {
+          arguments: [],
+          dataUrl: buildUrl + "/Web_W3.data.unityweb",
+          frameworkUrl: buildUrl + "/Web_W3.framework.js.unityweb",
+          codeUrl: buildUrl + "/Web_W3.wasm.unityweb",
+          streamingAssetsUrl: "StreamingAssets",
+          companyName: "DefaultCompany",
+          productName: "LOB-Game",
+          productVersion: "1.3-W3",
+          showBanner: unityShowBanner,
+          // errorHandler: function (err, url, line) {
+          //   // Return true if the error was handled and Unity should not process it further.
+          //   return true;
+          // },
+        };
+
+        // Data caching: with Player Settings > Publishing Settings > Data Caching on, the Unity 6
+        // loader itself keeps the .data file (and any .bundle files) in IndexedDB and revalidates
+        // them on each visit. Unity's Default template has no cacheControl hook; to change that
+        // policy, set config.cacheControl = function (url) { return "must-revalidate"; };
+        //
+        // config.matchWebGLToCanvasSize keeps its default (true), so the game's render size
+        // follows the window. config.devicePixelRatio = 1 would trade sharpness for speed.
+        //
+        // Files the game writes under Application.persistentDataPath reach IndexedDB
+        // automatically only with this Unity 6 opt-in (otherwise only when Unity runs a sync,
+        // for example on PlayerPrefs.Save()):
+        config.autoSyncPersistentDataPath = true; // SR49: saves and the resume slot survive a reload (lead, M7)
+
+        function onProgress(progress) {
+          var percent;
+          if (!(progress > shownProgress)) return; // forward only; also ignores NaN
+          shownProgress = Math.min(progress, 1);
+          percent = Math.round(shownProgress * 100);
+          progressBarFull.style.width = percent + "%";
+          progressBar.setAttribute("aria-valuenow", String(percent));
+          loadingPercent.textContent = percent + "%";
+          // Unity reports downloads as 0-90%; the rest is compiling and starting the game.
+          if (shownProgress >= 0.9 && loadingBar.className.indexOf("is-starting") === -1) {
+            loadingBar.className += " is-starting";
+            loadingStatus.textContent = "Starting the game\u2026";
+          }
+        }
+
+        function onReady(unityInstance) {
+          ready = true;
+          setState("ready");
+          loadingBar.hidden = true;
+          if (failed) {
+            // The game started even though an error was reported: never cover a running
+            // game, keep the message as a banner instead.
+            failed = false;
+            errorPanel.hidden = true;
+            addBanner(errorText.textContent, "error");
+          }
+          overlay.hidden = true;
+
+          fullscreenButton.disabled = false;
+          fullscreenButton.addEventListener("click", function () {
+            unityInstance.SetFullscreen(1);
+            focusCanvas();
+          });
+        }
+
+        function startUnity() {
+          var script;
+          if (started) return;
+          started = true;
+          setState("loading");
+          deviceNotice.hidden = true;
+          loadingBar.hidden = false;
+
+          script = document.createElement("script");
+          script.src = loaderUrl;
+          script.onload = function () {
+            var instance;
+            if (typeof createUnityInstance !== "function") {
+              showError("The game loader (" + loaderUrl + ") did not start.");
+              return;
+            }
+            try {
+              instance = createUnityInstance(canvas, config, onProgress);
+            } catch (err) {
+              showError(err);
+              return;
+            }
+            instance.then(function (unityInstance) {
+              try {
+                onReady(unityInstance);
+              } catch (err) {
+                if (window.console) console.error(err);
+              }
+            }, showError);
+          };
+          script.onerror = function () {
+            showError("Could not download " + loaderUrl + ". Check the internet connection, then reload the page.");
+          };
+          document.body.appendChild(script);
+        }
+
+        // ---- Start ------------------------------------------------------------
+
+        reloadButton.addEventListener("click", function () {
+          window.location.reload();
+        });
+
+        if (isTouchFirstDevice()) {
+          // Do not download anything until the player chooses (saves mobile data).
+          setState("notice");
+          deviceNotice.hidden = false;
+          loadAnywayButton.addEventListener("click", startUnity);
+        } else {
+          startUnity();
+        }
+      })();
+    </script>
+  </body>
+</html>
