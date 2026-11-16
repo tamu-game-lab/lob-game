@@ -189,7 +189,7 @@ Whichever way you go, the place where the data is stored has to match your IRB a
 ## For the game team
 
 - Offline tests (Node.js only, no packages): `node apps-script/test/run-tests.js`
-- The live web app runs in the study lead's personal Google account, not a TAMU one (see "Where things stand"). `?op=health` shows which receiver version is live; the repository's is 1.2.0, which Bryan deploys with "Updating the receiver (same URL)".
+- The live web app runs in the study lead's personal Google account, not a TAMU one (see "Where things stand"). `?op=health` shows which receiver version is live; the repository's is 1.2.0, which the study lead deploys with "Updating the receiver (same URL)".
 - Bump `SCRIPT_VERSION` in `Code.gs` with every change; `?op=health` shows it.
 - `?op=code` stays for builds before W5i, which ask it before study mode: from 1.2.0 it answers `known: true` for every well-formed code.
 - `setupSettings`, `installDigestTrigger`, `removeDigestTrigger` and `sendDigest` are run from the script editor (or, for `sendDigest`, by its trigger), never through the web app.
