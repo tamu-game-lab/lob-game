@@ -16,11 +16,11 @@ There is no game source code and no play data here. The Unity project is kept in
 | Link | Use |
 |---|---|
 | `https://tamu-game-lab.github.io/lob-game/` | Tryout mode: any well-formed code works, and rows go to tryout tabs. |
-| `...?mode=study&id=P042` | Study mode with the code prefilled (for a hand-off from a pre-test). |
+| `...?mode=study&id=BLU4821` | Study mode with the study ID's color and digits filled in (for a hand-off from a pre-test survey). |
 | `...?mode=off` | Nothing is sent. |
 | `...?fps=1` | Shows a frame counter. |
 
-Codes are pseudonymous: one to three letters and one to four digits, such as P042. The data holds no names, emails, student numbers or free text. See `docs/data-dictionary.md`.
+From W5i each player makes their own study ID: a favorite color's three letters and the last four digits of their phone, such as BLU4821. Nobody holds a list of IDs or a key to names. (Earlier builds used assigned codes of one to three letters and one to four digits, such as P042.) The data holds no names, emails, student numbers or free text. See `docs/data-dictionary.md`.
 
 ## Releases
 | Build | Version | Published | Purpose |
@@ -30,5 +30,6 @@ Codes are pseudonymous: one to three letters and one to four digits, such as P04
 | W2.1 | 1.2.1-W2.1 | 2026-10-29 (replaced by W3) | W2 with play data posting to the Apps Script receiver (1.0.1 deployed); the data-only build before W3. |
 | Receiver | 1.1.0 | 2026-10-29 (`apps-script/`) | The Apps Script receiver emails the study team when a session finishes: one email per session, or an hourly digest during class, set in the Sheet's `settings` tab. Counts and a link to the Sheet only, never the data. Setup: `docs/apps-script-setup.md`, Part 7. |
 | W3 | 1.3-W3 | 2026-10-30 (live) | Realistic work on site (SIM.L17), one onboarding flow (SR51), a modern game UI (SR52), the whole environment kit; Finish never blocks on the receiver. |
+| Receiver | 1.2.0 | 2026-11-16 (`apps-script/`; live once the study lead deploys it) | The self-made study ID: in study mode every well-formed ID goes to the study tabs, the `codes` tab is no longer read and nothing new goes to `unmatched`; the reply counts the rows per tab. Deployed as a new version of the same web app, so the URL stays. Steps: `docs/apps-script-setup.md`, "Updating the receiver (same URL)". |
 
 Play data is sent only once the study team's Apps Script address is set in a build (see `docs/apps-script-setup.md`). Until then the game keeps a player's rows for "Download my data" at Finish session.

@@ -57,6 +57,11 @@ function readReply(output) {
   return JSON.parse(output.getContent());
 }
 
+/** The success reply (1.2.0): the rows appended, and how many went to each tab. */
+function stored(appended, tabs) {
+  return { ok: true, appended: appended, tabs: tabs };
+}
+
 let nextSeq = 1;
 function row(kind, fields, extra) {
   return Object.assign({ kind: kind, row_seq: nextSeq++, client_time: CLIENT_TIME }, fields, extra);
@@ -121,7 +126,7 @@ function utf8HeavyBody() {
   return text;
 }
 
-/** The codes tab as Bryan would type it: a header row, then one code per row. */
+/** A codes tab as receivers before 1.2.0 read it: a header row, then one code per row. */
 function addCodes(env, lines) {
   const sheet = env.spreadsheet.insertSheet('codes');
   sheet.getRange(1, 1, lines.length + 1, 2).setValues([['code', 'active']].concat(lines));
@@ -183,7 +188,7 @@ function test(name, fn) {
 test('the game\'s post (fixtures/client_post_w1.json), as is, adds one row to each test tab with the post\'s values', () => {
   const env = makeEnv();
   const game = JSON.parse(CLIENT_POST);
-  assert.deepStrictEqual(post(env, CLIENT_POST), { ok: true, appended: 4 });
+  assert.deepStrictEqual(post(env, CLIENT_POST), stored(4, { test_sessions: 1, test_progress: 1, test_events: 1, test_runs: 1 }));
   assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['test_sessions', 'test_progress', 'test_events', 'test_runs']);
   env.spreadsheet.sheetNames().forEach((name, i) => {
     const sheet = tab(env, name);
@@ -218,7 +223,7 @@ test('a copy of the game\'s post whose row mode differs from the post is rejecte
 test('a valid tryout post appends to tryout_progress with a header row', () => {
   const env = makeEnv();
   const reply = post(env, body({ rows: [progressRow({ row_seq: 7 })] }));
-  assert.deepStrictEqual(reply, { ok: true, appended: 1 });
+  assert.deepStrictEqual(reply, stored(1, { tryout_progress: 1 }));
   assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['tryout_progress']);
   const sheet = tab(env, 'tryout_progress');
   assert.deepStrictEqual(sheet.header(), COMMON.concat(['node', 'action', 'seconds']));
@@ -262,8 +267,8 @@ test('a row may repeat the post fields: code is compared upper-case, and the sto
   const env = makeEnv();
   const same = { schema: 1, mode: 'tryout', build: 'W1 2026-10-28', session: SESSION };
   const repeat = code => progressRow(Object.assign({ code: code }, same));
-  assert.deepStrictEqual(post(env, body({ code: 'P042', rows: [repeat('p042')] })), { ok: true, appended: 1 });
-  assert.deepStrictEqual(post(env, body({ code: 'p042', rows: [repeat('P042')] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ code: 'P042', rows: [repeat('p042')] })), stored(1, { tryout_progress: 1 }));
+  assert.deepStrictEqual(post(env, body({ code: 'p042', rows: [repeat('P042')] })), stored(1, { tryout_progress: 1 }));
   const sheet = tab(env, 'tryout_progress');
   assert.deepStrictEqual(sheet.header(), COMMON.concat(['node', 'action', 'seconds']));
   assert.deepStrictEqual(sheet.records().map(r => r.code), ['P042', 'P042']);
@@ -272,7 +277,7 @@ test('a row may repeat the post fields: code is compared upper-case, and the sto
 test('a new field adds a column on the right', () => {
   const env = makeEnv();
   post(env, body());
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow({ attempts: 2 })] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow({ attempts: 2 })] })), stored(1, { tryout_progress: 1 }));
   const sheet = tab(env, 'tryout_progress');
   assert.deepStrictEqual(sheet.header(), COMMON.concat(['node', 'action', 'seconds', 'attempts']));
   const records = sheet.records();
@@ -295,7 +300,7 @@ test('rows are matched to columns by header name in a tab made by hand', () => {
 test('rows of each kind go to their own tab, with one data write per tab', () => {
   const env = makeEnv();
   const reply = post(env, body({ rows: [sessionRow(), progressRow(), runRow(), eventRow(), progressRow()] }));
-  assert.deepStrictEqual(reply, { ok: true, appended: 5 });
+  assert.deepStrictEqual(reply, stored(5, { tryout_sessions: 1, tryout_progress: 2, tryout_runs: 1, tryout_events: 1 }));
   assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['tryout_sessions', 'tryout_progress', 'tryout_runs', 'tryout_events']);
   env.spreadsheet.sheetNames().forEach(name => assert.strictEqual(dataWrites(env, name).length, 1, name));
   assert.strictEqual(tab(env, 'tryout_progress').records().length, 2);
@@ -307,7 +312,7 @@ test('rows of each kind go to their own tab, with one data write per tab', () =>
 
 test('test mode writes to test_ tabs', () => {
   const env = makeEnv();
-  assert.deepStrictEqual(post(env, body({ mode: 'test', rows: [sessionRow(), eventRow()] })), { ok: true, appended: 2 });
+  assert.deepStrictEqual(post(env, body({ mode: 'test', rows: [sessionRow(), eventRow()] })), stored(2, { test_sessions: 1, test_events: 1 }));
   assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['test_sessions', 'test_events']);
 });
 
@@ -335,7 +340,7 @@ test('numbers and booleans keep their type; null becomes an empty cell', () => {
 
 test('a field named like a built-in property ("constructor") is stored like any other', () => {
   const env = makeEnv();
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow({ constructor: 'x' })] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow({ constructor: 'x' })] })), stored(1, { tryout_progress: 1 }));
   const sheet = tab(env, 'tryout_progress');
   assert.deepStrictEqual(sheet.header(), COMMON.concat(['node', 'action', 'seconds', 'constructor']));
   assert.strictEqual(sheet.records()[0].constructor, 'x');
@@ -343,7 +348,7 @@ test('a field named like a built-in property ("constructor") is stored like any 
 
 test('a tab grows past 26 columns', () => {
   const env = makeEnv();
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('f', 30))] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('f', 30))] })), stored(1, { tryout_progress: 1 }));
   const sheet = tab(env, 'tryout_progress');
   assert.strictEqual(sheet.header().length, COMMON.length + 3 + 30);
   assert.ok(sheet.getMaxColumns() >= COMMON.length + 3 + 30);
@@ -353,15 +358,15 @@ test('a tab grows past 26 columns', () => {
 test('a full tab grows past its last row', () => {
   const env = makeEnv();
   env.spreadsheet.insertSheet('tryout_progress').maxRows = 2;
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow(), progressRow(), progressRow()] })), { ok: true, appended: 3 });
-  assert.deepStrictEqual(post(env, body()), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow(), progressRow(), progressRow()] })), stored(3, { tryout_progress: 3 }));
+  assert.deepStrictEqual(post(env, body()), stored(1, { tryout_progress: 1 }));
   assert.strictEqual(tab(env, 'tryout_progress').records().length, 4);
 });
 
 test('100 rows in one post are accepted and written with one call', () => {
   const env = makeEnv();
   const rows = Array.from({ length: 100 }, () => progressRow());
-  assert.deepStrictEqual(post(env, body({ rows: rows })), { ok: true, appended: 100 });
+  assert.deepStrictEqual(post(env, body({ rows: rows })), stored(100, { tryout_progress: 100 }));
   assert.strictEqual(tab(env, 'tryout_progress').records().length, 100);
   assert.strictEqual(dataWrites(env, 'tryout_progress').length, 1);
 });
@@ -369,21 +374,21 @@ test('100 rows in one post are accepted and written with one call', () => {
 test('limits are inclusive: 1000-char text, 4000-char detail, 40-char field name, 64 distinct fields', () => {
   const env = makeEnv();
   const rows = [progressRow({ node: 'x'.repeat(1000), ['a'.repeat(40)]: 1 }), eventRow({ detail: 'x'.repeat(4000) })];
-  assert.deepStrictEqual(post(env, body({ rows: rows })), { ok: true, appended: 2 });
+  assert.deepStrictEqual(post(env, body({ rows: rows })), stored(2, { tryout_progress: 1, tryout_events: 1 }));
   // 64 names over two tabs, so that neither tab passes the 60-column cap.
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('g', 29)), eventRow(fields('h', 24))] })), { ok: true, appended: 2 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('g', 29)), eventRow(fields('h', 24))] })), stored(2, { tryout_progress: 1, tryout_events: 1 }));
 });
 
 test('a body of exactly 200 KB (204800 bytes) is accepted', () => {
   const env = makeEnv();
-  assert.deepStrictEqual(post(env, sizedBody(MAX_BODY_BYTES)), { ok: true, appended: 52 });
+  assert.deepStrictEqual(post(env, sizedBody(MAX_BODY_BYTES)), stored(52, { tryout_events: 52 }));
 });
 
 // ------------------------------------------------------------------ column cap
 
 test('a tab grows to exactly 60 columns', () => {
   const env = makeEnv();
-  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('f', 48))] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [progressRow(fields('f', 48))] })), stored(1, { tryout_progress: 1 }));
   assert.strictEqual(tab(env, 'tryout_progress').header().length, 60);
 });
 
@@ -410,7 +415,7 @@ test('a tab already over 60 columns takes rows that add no column, but no new co
   const sheet = env.spreadsheet.insertSheet('tryout_progress');
   sheet.insertColumnsAfter(26, wide.length - 26);
   sheet.getRange(1, 1, 1, wide.length).setValues([wide]);
-  assert.deepStrictEqual(post(env, body()), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body()), stored(1, { tryout_progress: 1 }));
   assert.deepStrictEqual(post(env, body({ rows: [progressRow({ attempts: 2 })] })),
     { ok: false, error: 'too many columns (tryout_progress, new fields: attempts)', retry: false });
   assert.strictEqual(sheet.records().length, 1);
@@ -430,7 +435,7 @@ test('a new tab that would need more than 60 columns is not made', () => {
 test('a duplicate batch appends nothing', () => {
   const env = makeEnv();
   const b = body();
-  assert.deepStrictEqual(post(env, b), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, b), stored(1, { tryout_progress: 1 }));
   assert.deepStrictEqual(post(env, b), { ok: true, appended: 0, duplicate: true });
   assert.deepStrictEqual(post(env, Object.assign({}, b, { batch: b.batch.toUpperCase() })), { ok: true, appended: 0, duplicate: true });
   assert.strictEqual(tab(env, 'tryout_progress').records().length, 1);
@@ -446,7 +451,7 @@ test('a copy appended while this request waited for the lock is caught under the
     first = post(env, b); // another request with the same batch gets the lock first
   };
   const second = post(env, b);
-  assert.deepStrictEqual(first, { ok: true, appended: 1 });
+  assert.deepStrictEqual(first, stored(1, { tryout_progress: 1 }));
   assert.deepStrictEqual(second, { ok: true, appended: 0, duplicate: true });
   assert.strictEqual(tab(env, 'tryout_progress').records().length, 1);
   assert.strictEqual(env.locks.held, false);
@@ -457,91 +462,56 @@ test('a retry after the 6-hour cache window is appended again (session + row_seq
   const b = body();
   post(env, b);
   env.clock.now += (21600 + 1) * 1000;
-  assert.deepStrictEqual(post(env, b), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, b), stored(1, { tryout_progress: 1 }));
   const records = tab(env, 'tryout_progress').records();
   assert.strictEqual(records.length, 2);
   assert.deepStrictEqual([records[1].session, records[1].row_seq], [records[0].session, records[0].row_seq]);
 });
 
-// ------------------------------------------------------------------ study mode and codes
+// ------------------------------------------------------------------ study mode and study IDs (receiver 1.2.0)
 
-test('study mode with an active code goes to the study tab', () => {
+test('study mode files an unlisted well-formed ID (BLU4821) in the study tabs, with the rows per tab in the reply; nothing goes to unmatched', () => {
   const env = makeEnv();
-  addCodes(env, [['P042', 'TRUE'], ['P043', '']]);
-  assert.deepStrictEqual(post(env, body({ mode: 'study' })), { ok: true, appended: 1 });
-  assert.deepStrictEqual(post(env, body({ mode: 'study', code: 'p043' })), { ok: true, appended: 1 });
-  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['codes', 'progress']);
-  const sheet = tab(env, 'progress');
-  assert.ok(!sheet.header().includes('target_tab'));
-  assert.deepStrictEqual(sheet.records().map(r => [r.mode, r.code]), [['study', 'P042'], ['study', 'P043']]);
+  const reply = post(env, body({ mode: 'study', code: 'blu4821', rows: [progressRow(), sessionRow(), eventRow(), eventRow()] }));
+  assert.deepStrictEqual(reply, stored(4, { progress: 1, sessions: 1, events: 2 }));
+  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['progress', 'sessions', 'events']);
+  env.spreadsheet.sheetNames().forEach(name => {
+    const sheet = tab(env, name);
+    assert.ok(!sheet.header().includes('target_tab'), name);
+    sheet.records().forEach(r => assert.deepStrictEqual([r.mode, r.code], ['study', 'BLU4821'], name));
+  });
+  assert.deepStrictEqual(post(env, body({ mode: 'study', code: 'P042', rows: [runRow()] })), stored(1, { runs: 1 }), 'an old-style code too');
+  assert.ok(!env.spreadsheet.sheetNames().includes('unmatched'));
 });
 
-test('study mode with an unknown code goes to unmatched, with target_tab', () => {
-  const env = makeEnv();
-  addCodes(env, [['P042', 'TRUE']]);
-  const reply = post(env, body({ mode: 'study', code: 'Q777', rows: [progressRow(), sessionRow()] }));
-  assert.deepStrictEqual(reply, { ok: true, appended: 2 });
-  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['codes', 'unmatched']);
-  const sheet = tab(env, 'unmatched');
-  assert.deepStrictEqual(sheet.header().slice(0, COMMON.length + 1), COMMON.concat(['target_tab']));
-  const records = sheet.records();
-  assert.deepStrictEqual(records.map(r => [r.kind, r.code, r.target_tab]), [['progress', 'Q777', 'progress'], ['session', 'Q777', 'sessions']]);
-  assert.deepStrictEqual([records[0].node, records[1].platform], ['bars_to_lines', 'web']);
-});
-
-test('study mode with an inactive code goes to unmatched', () => {
+test('no mode reads the codes tab: study files a code the old tab lists as inactive, and the codes and unmatched tabs are left as they are', () => {
   const env = makeEnv();
   addCodes(env, [['P042', 'FALSE']]);
-  assert.deepStrictEqual(post(env, body({ mode: 'study' })), { ok: true, appended: 1 });
-  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['codes', 'unmatched']);
-  assert.strictEqual(tab(env, 'unmatched').records()[0].target_tab, 'progress');
-});
-
-test('study mode with no codes tab keeps the rows, in unmatched', () => {
-  const env = makeEnv();
-  assert.deepStrictEqual(post(env, body({ mode: 'study' })), { ok: true, appended: 1 });
-  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['unmatched']);
-});
-
-test('tryout and test modes take any well-formed code without reading the codes tab', () => {
-  const env = makeEnv();
-  addCodes(env, [['P042', 'FALSE']]);
-  assert.deepStrictEqual(post(env, body()), { ok: true, appended: 1 });
-  assert.deepStrictEqual(post(env, body({ mode: 'test', code: 'ZZ9999' })), { ok: true, appended: 1 });
+  const unmatched = env.spreadsheet.insertSheet('unmatched');
+  unmatched.getRange(1, 1, 2, 3).setValues([['kind', 'code', 'target_tab'], ['progress', 'Q777', 'progress']]);
+  const before = ['codes', 'unmatched'].map(name => JSON.stringify([tab(env, name).header(), tab(env, name).records()]));
+  const calls = sheetsCalls(env, () => {
+    assert.deepStrictEqual(post(env, body({ mode: 'study' })), stored(1, { progress: 1 }));
+    assert.deepStrictEqual(post(env, body({ mode: 'study', code: 'GRY0000' })), stored(1, { progress: 1 }));
+    assert.deepStrictEqual(post(env, body()), stored(1, { tryout_progress: 1 }));
+    assert.deepStrictEqual(post(env, body({ mode: 'test', code: 'ZZ9999' })), stored(1, { test_progress: 1 }));
+    assert.deepStrictEqual(get(env, { op: 'code', code: 'P042' }), { ok: true, known: true });
+  });
+  assert.deepStrictEqual(calls.filter(call => call.startsWith('codes ') || call.startsWith('unmatched ')), []);
   assert.strictEqual(codeReads(env), 0);
-  assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['codes', 'tryout_progress', 'test_progress']);
+  assert.deepStrictEqual(['codes', 'unmatched'].map(name => JSON.stringify([tab(env, name).header(), tab(env, name).records()])), before);
+  assert.deepStrictEqual(tab(env, 'progress').records().map(r => r.code), ['P042', 'GRY0000']);
+  assert.deepStrictEqual(env.cache.puts.map(p => p.expirationInSeconds), [21600, 21600, 21600, 21600], 'only batch ids are cached');
 });
 
-test('codes tab: case and spaces are ignored, only TRUE or blank is active, a FALSE entry wins', () => {
-  const env = makeEnv();
-  addCodes(env, [[' p050 ', ''], ['P051', 'no'], ['P052', 'TRUE'], ['P052', 'FALSE'], ['P053', 1], ['P054', true]]);
-  const known = code => get(env, { op: 'code', code: code }).known;
-  assert.deepStrictEqual(['P050', 'P051', 'P052', 'P053', 'P054'].map(known), [true, false, false, false, true]);
-});
-
-test('codes tab columns are found by header name', () => {
-  const env = makeEnv();
-  env.spreadsheet.insertSheet('codes').getRange(1, 1, 3, 3).setValues([
-    ['Active', 'Note', 'Code'],
-    ['FALSE', 'pilot', 'P001'],
-    ['', '', 'P002'],
-  ]);
-  assert.strictEqual(get(env, { op: 'code', code: 'P001' }).known, false);
-  assert.strictEqual(get(env, { op: 'code', code: 'P002' }).known, true);
-});
-
-test('the code list is cached for 60 seconds', () => {
-  const env = makeEnv();
-  const codes = addCodes(env, [['P042', 'TRUE']]);
-  post(env, body({ mode: 'study' }));
-  codes.getRange(2, 2).setValues([[false]]); // the code is switched off in the Sheet
-  post(env, body({ mode: 'study' })); // within 60 s the cached list still has it
-  env.clock.now += 61 * 1000;
-  post(env, body({ mode: 'study' })); // the list is read again: now inactive
-  assert.strictEqual(tab(env, 'progress').records().length, 2);
-  assert.strictEqual(tab(env, 'unmatched').records().length, 1);
-  assert.strictEqual(codeReads(env), 2);
-  assert.strictEqual(env.cache.puts.filter(p => p.expirationInSeconds === 60).length, 2);
+test('a malformed code in study mode is still refused whole with retry:false, and nothing is written', () => {
+  ['blue4821x', 'BLUE4821', 'BLU48210', 'BLU-4821', ''].forEach(code => {
+    const env = makeEnv();
+    const reply = post(env, body({ mode: 'study', code: code, rows: [sessionRow(), progressRow()] }));
+    assert.deepStrictEqual(reply, { ok: false, error: 'bad code', retry: false }, code);
+    assert.strictEqual(env.spreadsheet.sheets.length, 0, code);
+    assert.strictEqual(env.locks.waits.length, 0, code);
+  });
 });
 
 // ------------------------------------------------------------------ invalid posts
@@ -639,7 +609,7 @@ test('lock failure returns busy with retry:true and writes nothing', () => {
   assert.ok(env.locks.waits[0] >= 15000 && env.locks.waits[0] <= 25000, 'waits about 20 s for the lock');
   assert.strictEqual(env.spreadsheet.sheets.length, 0);
   env.locks.busy = false;
-  assert.deepStrictEqual(post(env, b), { ok: true, appended: 1 }, 'the retry goes through');
+  assert.deepStrictEqual(post(env, b), stored(1, { tryout_progress: 1 }), 'the retry goes through');
 });
 
 test('a failure while writing replies retry:true, releases the lock, and the retry goes through', () => {
@@ -648,7 +618,7 @@ test('a failure while writing replies retry:true, releases the lock, and the ret
   const b = body();
   assert.deepStrictEqual(post(env, b), { ok: false, error: 'server', retry: true });
   assert.strictEqual(env.locks.held, false);
-  assert.deepStrictEqual(post(env, b), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, b), stored(1, { tryout_progress: 1 }));
   assert.strictEqual(tab(env, 'tryout_progress').records().length, 1);
 });
 
@@ -687,12 +657,11 @@ test('an append to existing tabs makes 8 Sheets calls a tab, every read before t
 
 test('logs hold counts and error kinds, never payload contents', () => {
   const env = makeEnv();
-  addCodes(env, [['ZQ9', 'TRUE']]);
   const marker = 'marker7731';
   const b = body({ mode: 'study', code: 'ZQ9', build: marker, rows: [eventRow({ type: marker, detail: '{"note":"' + marker + '"}' })] });
   post(env, b); // appended
   post(env, b); // duplicate
-  post(env, body({ mode: 'study', code: 'ZQ8', build: marker })); // unmatched
+  post(env, body({ mode: 'study', code: 'ZQ8', build: marker, rows: [sessionRow(), progressRow()] })); // appended to two tabs
   post(env, body({ code: 'ZQ9', rows: [progressRow({ node: marker, server_time: marker })] })); // reserved field
   post(env, body({ code: 'ZQ9', [marker]: 1 })); // unknown body field (named in the reply only)
   post(env, '{"build":"' + marker + '",'); // bad json
@@ -720,16 +689,20 @@ test('doGet health returns ok, schema 1, the script version and the time', () =>
   assert.match(reply.time, ISO_SECONDS);
 });
 
-test('doGet code answers for the one code asked about', () => {
+test('doGet code answers known for any well-formed code (BLU4821, P042) and not for a malformed one, without reading a codes tab', () => {
   const env = makeEnv();
-  addCodes(env, [['P042', 'TRUE'], ['P043', 'FALSE']]);
+  addCodes(env, [['P043', 'FALSE']]);
   const ask = code => get(env, code === undefined ? { op: 'code' } : { op: 'code', code: code });
-  assert.deepStrictEqual(ask('P042'), { ok: true, known: true });
-  assert.deepStrictEqual(ask('p042'), { ok: true, known: true });
-  assert.deepStrictEqual(ask('P043'), { ok: true, known: false });
-  assert.deepStrictEqual(ask('Q1'), { ok: true, known: false });
-  assert.deepStrictEqual(ask('P-42'), { ok: true, known: false });
-  assert.deepStrictEqual(ask(undefined), { ok: true, known: false });
+  const calls = sheetsCalls(env, () => {
+    ['BLU4821', 'blu4821', 'P042', 'p042', 'P043', 'Q1', 'GRY0000'].forEach(code => {
+      assert.deepStrictEqual(ask(code), { ok: true, known: true }, code);
+    });
+    ['blue4821x', 'BLUE4821', 'BLU48210', 'P-42', ' P042', '', undefined].forEach(code => {
+      assert.deepStrictEqual(ask(code), { ok: true, known: false }, String(code));
+    });
+  });
+  assert.deepStrictEqual(calls, [], 'the Sheet is not opened');
+  assert.strictEqual(env.cache.puts.length, 0);
 });
 
 test('doGet with any other op replies unknown op', () => {
@@ -770,7 +743,7 @@ test('session mode: a finish sends one email, after the lock is released, with t
   const held = [];
   env.mail.onSend = () => held.push(env.locks.held);
   const last = body({ rows: [eventRow({ type: marker }), finishRow()] });
-  assert.deepStrictEqual(post(env, last), { ok: true, appended: 2 });
+  assert.deepStrictEqual(post(env, last), stored(2, { tryout_events: 1, tryout_sessions: 1 }));
   assert.deepStrictEqual(held, [false], 'one email, sent with the lock released');
   const mail = env.mail.sent[0];
   assert.strictEqual(mail.to, DEPLOYER, 'a blank email_to sends to the deploying account');
@@ -842,7 +815,7 @@ test('email_mode off, the default, sends and queues nothing, and so does a recei
   [true, false].forEach(setup => {
     const env = makeEnv();
     if (setup) env.context.setupSettings();
-    assert.deepStrictEqual(post(env, body({ rows: [sessionRow(), finishRow()] })), { ok: true, appended: 2 });
+    assert.deepStrictEqual(post(env, body({ rows: [sessionRow(), finishRow()] })), stored(2, { tryout_sessions: 2 }));
     env.context.sendDigest();
     assert.strictEqual(env.mail.sent.length, 0);
     assert.ok(!env.spreadsheet.sheetNames().includes('digest_queue'));
@@ -877,7 +850,7 @@ test('the "Download my data" status row (downloaded TRUE) is stored but is not a
   const env = makeEnv();
   emailSettings(env, { email_mode: 'session' });
   post(env, body({ rows: [finishRow()] }));
-  assert.deepStrictEqual(post(env, body({ rows: [finishRow({ downloaded: true })] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow({ downloaded: true })] })), stored(1, { tryout_sessions: 1 }));
   assert.strictEqual(env.mail.sent.length, 1);
   assert.strictEqual(tab(env, 'tryout_sessions').records().length, 2);
 });
@@ -886,12 +859,12 @@ test('a mail failure is logged without the address and the post still succeeds; 
   const env = makeEnv();
   emailSettings(env, { email_mode: 'session', email_to: 'inbox@example.com' });
   env.mail.failWith = 'Invalid email: inbox@example.com';
-  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), stored(1, { tryout_sessions: 1 }));
   assert.strictEqual(tab(env, 'tryout_sessions').records().length, 1);
   assert.strictEqual(env.mail.sent.length, 0);
   assert.strictEqual(env.logs[env.logs.length - 1], 'error: email failed (session email): Error: Exception: Invalid email: <address>');
   assert.strictEqual(env.locks.held, false);
-  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), stored(1, { tryout_sessions: 1 }));
   assert.deepStrictEqual(env.mail.sent.map(m => m.to), ['inbox@example.com']);
   assert.ok(!env.logs.join('\n').includes('@'), 'no address in the logs');
 });
@@ -905,7 +878,7 @@ test('a settings read that fails after the rows are stored is logged, and the po
     flush();
     env.spreadsheet.failOn = 'getSheetByName'; // its next call is the settings read, once the lock is released
   };
-  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), stored(1, { tryout_sessions: 1 }));
   assert.strictEqual(tab(env, 'tryout_sessions').records().length, 1);
   assert.strictEqual(env.mail.sent.length, 0);
   assert.ok(env.logs[env.logs.length - 1].startsWith('error: email failed (settings): Error: Exception: Service Spreadsheets failed'));
@@ -919,7 +892,7 @@ test('digest failures never fail a post or lose a line: a queue lock timeout is 
   env.locks.onWait = () => {
     env.locks.busy = env.locks.waits.length > before + 1; // the post gets the lock; the queue's wait times out
   };
-  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), { ok: true, appended: 1 });
+  assert.deepStrictEqual(post(env, body({ rows: [finishRow()] })), stored(1, { tryout_sessions: 1 }));
   env.locks.onWait = null;
   env.locks.busy = false;
   assert.ok(env.logs[env.logs.length - 1].startsWith('error: email failed (digest queue): Error: Exception: Lock timeout'));
@@ -956,10 +929,10 @@ test('a long digest_queue goes out 200 lines a digest, under the 200 KB email bo
   assert.deepStrictEqual(queue.records(), []);
 });
 
-test('health shows 1.1.0 and, once the settings tab exists, the effective email mode; a value it cannot use counts as off and is listed by key only', () => {
+test('health shows 1.2.0 and, once the settings tab exists, the effective email mode; a value it cannot use counts as off and is listed by key only', () => {
   const env = makeEnv();
   const health = () => get(env, { op: 'health' });
-  assert.ok(health().script.startsWith('lob-receiver 1.1.0 '), health().script);
+  assert.strictEqual(health().script, 'lob-receiver 1.2.0 (2026-11-16)');
   assert.deepStrictEqual(Object.keys(health()).sort(), ['ok', 'schema', 'script', 'time'], 'no settings tab: 1.0.1\'s fields');
   env.context.setupSettings();
   assert.deepStrictEqual(Object.keys(health()).sort(), ['email', 'ok', 'schema', 'script', 'time']);
@@ -1017,18 +990,33 @@ test('installDigestTrigger() leaves exactly one sendDigest trigger, every digest
   assert.deepStrictEqual(triggers(), ['otherJob every 12 hours']);
 });
 
-test('a study finish from a code that is not active still sends its email, counting the unmatched rows', () => {
+test('a study finish from a self-made ID sends its email; rows a receiver before 1.2.0 filed in unmatched still count in the totals', () => {
   const env = makeEnv();
-  addCodes(env, [['P042', 'TRUE']]);
-  emailSettings(env, { email_mode: 'session' });
-  post(env, body({ mode: 'study', code: 'Q777', rows: [sessionRow(), eventRow()] }));
-  post(env, body({ mode: 'study', code: 'Q777', rows: [finishRow()] }));
-  assert.strictEqual(env.mail.sent.length, 1);
-  assert.strictEqual(env.mail.sent[0].subject, 'LOB session finished: Q777 (study)');
-  assert.deepStrictEqual(env.mail.sent[0].body.split('\n').slice(5, 7), [
-    'Rows in the finishing post: sessions 0, progress 0, runs 0, events 0, unmatched 1',
-    'Total rows for this code: sessions 0, progress 0, runs 0, events 0, unmatched 3',
+  // What 1.1.0 did with this ID's rows before the deploy: the unmatched tab, with target_tab.
+  env.spreadsheet.insertSheet('unmatched').getRange(1, 1, 3, 3).setValues([
+    ['kind', 'code', 'target_tab'], ['session', 'BLU4821', 'sessions'], ['event', 'BLU4821', 'events'],
   ]);
+  emailSettings(env, { email_mode: 'session' });
+  post(env, body({ mode: 'study', code: 'BLU4821', rows: [sessionRow(), eventRow()] }));
+  assert.deepStrictEqual(post(env, body({ mode: 'study', code: 'BLU4821', rows: [finishRow()] })), stored(1, { sessions: 1 }));
+  assert.strictEqual(env.mail.sent.length, 1);
+  assert.strictEqual(env.mail.sent[0].subject, 'LOB session finished: BLU4821 (study)');
+  assert.deepStrictEqual(env.mail.sent[0].body.split('\n').slice(5, 7), [
+    'Rows in the finishing post: sessions 1, progress 0, runs 0, events 0',
+    'Total rows for this code: sessions 2, progress 0, runs 0, events 1, unmatched 2',
+  ]);
+  assert.strictEqual(tab(env, 'unmatched').records().length, 2, 'nothing new in unmatched');
+});
+
+test('digest mode in study queues a self-made ID\'s finish with added_unmatched 0', () => {
+  const env = makeEnv();
+  emailSettings(env, { email_mode: 'digest' });
+  post(env, body({ mode: 'study', code: 'GRN0042', rows: [sessionRow(), progressRow(), finishRow()] }));
+  const line = tab(env, 'digest_queue').records()[0];
+  assert.deepStrictEqual([line.code, line.mode, line.added_sessions, line.added_progress, line.added_unmatched], ['GRN0042', 'study', 2, 1, 0]);
+  env.context.sendDigest();
+  assert.ok(env.mail.sent[0].body.startsWith('GRN0042 (study); '), env.mail.sent[0].body);
+  assert.ok(env.mail.sent[0].body.includes('total rows for this code: sessions 2, progress 1, runs 0, events 0\n'));
 });
 
 test('an email holds no client text: the build keeps label characters only, and times that do not parse show as unknown', () => {
@@ -1103,7 +1091,10 @@ test('the load test sends test mode only, codes T900-T999, 20 rows like the game
       assert.strictEqual(p.mode, 'test');
       assert.strictEqual(p.rows.length, 20);
       p.rows.forEach(r => assert.deepStrictEqual([r.mode, r.code, r.session], ['test', client.code, client.session]));
-      assert.deepStrictEqual(post(env, p), { ok: true, appended: 20 });
+      const reply = post(env, p);
+      assert.deepStrictEqual([reply.ok, reply.appended], [true, 20]);
+      assert.ok(Object.keys(reply.tabs).every(name => name.startsWith('test_')), Object.keys(reply.tabs).join());
+      assert.strictEqual(Object.values(reply.tabs).reduce((a, n) => a + n, 0), 20);
     });
   });
   assert.deepStrictEqual(env.spreadsheet.sheetNames(), ['test_sessions', 'test_progress', 'test_events', 'test_runs']);

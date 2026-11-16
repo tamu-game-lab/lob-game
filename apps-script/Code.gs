@@ -28,10 +28,15 @@
  * spreadsheets (as before), script.send_mail (MailApp), script.scriptapp (the trigger)
  * and userinfo.email (the deploying account's address, the default recipient).
  *
+ * Study IDs (1.2.0): the player makes the study ID, so there is no list of codes. Every
+ * well-formed code goes to its mode's tabs, study included; the codes tab is not read and
+ * nothing new goes to unmatched (rows filed there before 1.2.0 stay, and the emails still
+ * count them). ?op=code answers known for any well-formed code, for builds that still ask.
+ *
  * Offline tests: node apps-script/test/run-tests.js
  */
 
-const SCRIPT_VERSION = 'lob-receiver 1.1.0 (2026-10-29)';
+const SCRIPT_VERSION = 'lob-receiver 1.2.0 (2026-11-16)';
 const SCHEMA = 1;
 
 const MAX_BODY_BYTES = 200 * 1024; // "at most 200 KB per post", counted in UTF-8 bytes
@@ -47,10 +52,9 @@ const MAX_COLUMNS = 60;
 
 const LOCK_WAIT_MS = 20000;
 const BATCH_TTL_S = 21600; // 6 h, the CacheService maximum
-const CODES_TTL_S = 60;
 const ROW_CHUNK = 1000; // a full tab grows by at least this many rows, so most appends skip the resize
 
-const CODES_TAB = 'codes';
+// Before 1.2.0 a study code not in the codes tab was filed here; the emails still count those rows.
 const UNMATCHED_TAB = 'unmatched';
 const MODE_PREFIX = { study: '', tryout: 'tryout_', test: 'test_' };
 const KIND_TAB = { session: 'sessions', progress: 'progress', run: 'runs', event: 'events' };
@@ -58,7 +62,7 @@ const BODY_FIELDS = ['schema', 'mode', 'build', 'code', 'session', 'batch', 'sen
 // The game repeats these post fields on every row. A row's copy must equal the post's
 // value (code after the same normalization); the post's value is the one stored.
 const POST_ROW_FIELDS = ['schema', 'mode', 'build', 'code', 'session'];
-// The server stamps these on rows, so a row may not carry them.
+// The server stamps these on rows (target_tab only before 1.2.0), so a row may not carry them.
 const RESERVED_ROW_FIELDS = ['server_time', 'target_tab'];
 
 const CODE_RE = /^[A-Za-z]{1,3}[0-9]{1,4}$/;
@@ -83,7 +87,8 @@ const ADDRESS_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 
 /**
  * Web app POST: one batch of rows from the game.
- * Replies {"ok":true,"appended":N}, {"ok":true,"appended":0,"duplicate":true},
+ * Replies {"ok":true,"appended":N,"tabs":{"<tab>":n,...}} (the rows appended per tab),
+ * {"ok":true,"appended":0,"duplicate":true},
  * {"ok":false,"error":"<reason>","retry":false} for an invalid post, or
  * {"ok":false,"error":"busy"|"server","retry":true} when the client should try again later.
  */
@@ -104,7 +109,8 @@ function doPost(e) {
 }
 
 /**
- * Web app GET: ?op=health, or ?op=code&code=P042 (answers for that one code; never lists codes).
+ * Web app GET: ?op=health, or ?op=code&code=BLU4821, which answers known for any well-formed
+ * code (1.2.0 keeps no list; builds before W5i still ask before study mode).
  * Once setupSettings() has made the settings tab, health also reports the effective email
  * mode, and the keys (never the values) of any setting it ignored; before that its reply
  * keeps 1.0.1's fields, and emails are off.
@@ -125,8 +131,7 @@ function doGet(e) {
     }
     if (params.op === 'code') {
       const code = typeof params.code === 'string' ? params.code : '';
-      const known = CODE_RE.test(code) && activeCodes_(spreadsheet_()).has(code.toUpperCase());
-      return reply_({ ok: true, known: known });
+      return reply_({ ok: true, known: CODE_RE.test(code) });
     }
     return reply_({ ok: false, error: 'unknown op' });
   } catch (err) {
@@ -226,9 +231,6 @@ function storePost_(post) {
   if (cacheGet_(batchKey) !== null) return duplicate_();
 
   const ss = spreadsheet_();
-  // Only study mode checks the code; tryout and test take any well-formed code.
-  const matched = post.mode !== 'study' || activeCodes_(ss).has(post.code);
-
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(LOCK_WAIT_MS);
@@ -236,37 +238,37 @@ function storePost_(post) {
     console.warn('busy: lock wait timed out');
     return reply_({ ok: false, error: 'busy', retry: true });
   }
-  let tabCount;
+  const tabs = {}; // rows appended per tab name, for the reply
   try {
     // A copy of this batch may have been appended while this request waited for the lock.
     if (cacheGet_(batchKey) !== null) return duplicate_();
     const plans = [];
-    groupRows_(post, matched, isoNow_()).forEach((rows, tabName) => plans.push(planTab_(ss, tabName, rows)));
+    groupRows_(post, isoNow_()).forEach((rows, tabName) => plans.push(planTab_(ss, tabName, rows)));
     plans.forEach(plan => writeTab_(ss, plan));
     // Keep this flush: the next post, under the lock, must see this post's committed last row, or it would overwrite it.
     SpreadsheetApp.flush();
     cachePut_(batchKey, '1', BATCH_TTL_S);
-    tabCount = plans.length;
+    plans.forEach(plan => {
+      tabs[plan.tabName] = plan.values.length;
+    });
   } finally {
     lock.releaseLock();
   }
-  console.log('appended rows=' + post.rows.length + ' tabs=' + tabCount + (matched ? '' : ' unmatched'));
-  notifyFinish_(ss, post, matched);
-  return reply_({ ok: true, appended: post.rows.length });
+  console.log('appended rows=' + post.rows.length + ' tabs=' + Object.keys(tabs).length);
+  notifyFinish_(ss, post);
+  return reply_({ ok: true, appended: post.rows.length, tabs: tabs });
 }
 
 /**
  * Builds the sheet rows of a post, grouped by tab. Each row starts with the common
  * fields (kind, the post-level values copied from the body, row_seq, client_time,
  * server_time), then its own fields in arrival order; a new tab's header follows this
- * order. Unmatched study rows go to the unmatched tab, with target_tab naming the tab
- * they would have gone to. A row's own copy of a post-level value is dropped: the
- * stored value is the post's.
+ * order. A row's own copy of a post-level value is dropped: the stored value is the post's.
  */
-function groupRows_(post, matched, serverTime) {
+function groupRows_(post, serverTime) {
   const tabs = new Map();
   post.rows.forEach(row => {
-    const target = MODE_PREFIX[post.mode] + KIND_TAB[row.kind];
+    const tabName = MODE_PREFIX[post.mode] + KIND_TAB[row.kind];
     const out = {
       kind: row.kind,
       schema: post.schema,
@@ -278,11 +280,9 @@ function groupRows_(post, matched, serverTime) {
       client_time: row.client_time,
       server_time: serverTime,
     };
-    if (!matched) out.target_tab = target;
     Object.keys(row).forEach(name => {
       if (!own_(out, name)) out[name] = row[name];
     });
-    const tabName = matched ? target : UNMATCHED_TAB;
     if (!tabs.has(tabName)) tabs.set(tabName, []);
     tabs.get(tabName).push(out);
   });
@@ -358,48 +358,6 @@ function writeTab_(ss, plan) {
   sheet.getRange(first, 1, plan.values.length, width).setValues(plan.values);
 }
 
-/** The active study codes, upper-case, cached for CODES_TTL_S seconds. */
-function activeCodes_(ss) {
-  const cached = cacheGet_('codes');
-  if (cached !== null) return new Set(JSON.parse(cached));
-  const codes = readActiveCodes_(ss);
-  cachePut_('codes', JSON.stringify(codes), CODES_TTL_S);
-  return new Set(codes);
-}
-
-/**
- * Reads the codes tab: columns "code" and "active", found by header name in row 1.
- * A code is active when its active cell is TRUE or blank. Any other value makes it
- * inactive, and so does a FALSE (or other) entry anywhere for the same code.
- */
-function readActiveCodes_(ss) {
-  const sheet = ss.getSheetByName(CODES_TAB);
-  if (!sheet) return [];
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
-  if (lastRow < 2 || lastCol < 1) return [];
-  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-  const header = values[0].map(h => String(h).trim().toLowerCase());
-  const codeCol = header.indexOf('code');
-  const activeCol = header.indexOf('active');
-  if (codeCol < 0) return [];
-  const active = new Map();
-  values.slice(1).forEach(line => {
-    const code = String(line[codeCol]).trim().toUpperCase();
-    if (code === '') return;
-    const on = activeCol < 0 || isActiveCell_(line[activeCol]);
-    active.set(code, (active.has(code) ? active.get(code) : true) && on);
-  });
-  return Array.from(active.keys()).filter(code => active.get(code));
-}
-
-function isActiveCell_(value) {
-  if (value === true || value === null || value === undefined) return true;
-  if (typeof value !== 'string') return false;
-  const text = value.trim().toUpperCase();
-  return text === '' || text === 'TRUE';
-}
-
 /**
  * Session emails, once a post is stored and the lock released. When the post holds the
  * row that marks its session's finish, the settings tab decides: email_mode off does
@@ -407,7 +365,7 @@ function isActiveCell_(value) {
  * duplicate post never gets here, so a retry sends no second email. It never throws: a
  * settings, mail or queue failure is logged, and the post keeps its normal reply.
  */
-function notifyFinish_(ss, post, matched) {
+function notifyFinish_(ss, post) {
   const finish = post.rows.find(isFinishRow_);
   if (!finish) return;
   let stage = 'settings';
@@ -416,10 +374,10 @@ function notifyFinish_(ss, post, matched) {
     if (settings.mode === 'session') {
       stage = 'session email';
       const totals = codeTotals_(ss, post.mode, [post.code]).get(post.code);
-      sendMail_(settings, sessionEmail_(finishSummary_(post, matched, finish), totals, ss.getUrl()));
+      sendMail_(settings, sessionEmail_(finishSummary_(post, finish), totals, ss.getUrl()));
     } else if (settings.mode === 'digest') {
       stage = 'digest queue';
-      queueFinish_(ss, finishSummary_(post, matched, finish));
+      queueFinish_(ss, finishSummary_(post, finish));
     }
   } catch (err) {
     emailFailed_(stage, err);
@@ -440,7 +398,7 @@ function isFinishRow_(row) {
  * dictionary's "seconds from start to finish"), both rewritten as ISO UTC times, or ''
  * when they do not parse; added counts this post's rows per tab.
  */
-function finishSummary_(post, matched, finish) {
+function finishSummary_(post, finish) {
   const finishMs = Date.parse(finish.client_time);
   const seconds = finish.seconds;
   return {
@@ -449,22 +407,22 @@ function finishSummary_(post, matched, finish) {
     build: emailBuild_(post.build),
     start: typeof seconds === 'number' && seconds >= 0 ? isoAt_(finishMs - seconds * 1000) : '',
     finish: isoAt_(finishMs),
-    added: addedCounts_(post, matched),
+    added: addedCounts_(post),
   };
 }
 
-/** This post's rows per tab, where groupRows_ sent them: the mode's tab for their kind, or unmatched. */
-function addedCounts_(post, matched) {
+/** This post's rows per tab, where groupRows_ sent them: the mode's tab for their kind (unmatched stays 0). */
+function addedCounts_(post) {
   const counts = emptyCounts_();
   post.rows.forEach(row => {
-    counts[matched ? KIND_TAB[row.kind] : UNMATCHED_TAB] += 1;
+    counts[KIND_TAB[row.kind]] += 1;
   });
   return counts;
 }
 
 /**
  * Rows per tab for each code, in the mode's four tabs and, in study mode, the unmatched
- * tab: a Map from code to counts keyed like emptyCounts_().
+ * tab (rows filed there before 1.2.0): a Map from code to counts keyed like emptyCounts_().
  */
 function codeTotals_(ss, mode, codes) {
   const totals = new Map(codes.map(code => [code, emptyCounts_()]));
