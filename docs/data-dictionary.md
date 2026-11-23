@@ -6,22 +6,26 @@ Rules:
 - Every new field is added here first, with a schema version bump.
 - The data holds no names, emails, student numbers or free text.
 - Players are identified only by a study ID they make themselves (section 3). Nobody holds a list of IDs or a key from IDs to names.
+- A new event type or `detail` key is not a new field: it is added here (section 8 and the change log) before the build that writes it, and the schema stays 1.
 
 ## 1. How data travels
 - **The client.** The game (`PlaytestService`) queues rows and posts them in batches: about once a minute, at every run end, and at Finish session.
   - Each post is one HTTP POST of JSON with `Content-Type: text/plain;charset=utf-8`, so the browser sends no CORS preflight.
   - Posts never block play. A post that gets no reply, an HTTP error or any reply but `ok:true` is resent with the same batch id after an exponential backoff with jitter: 5 s doubling, times 0.5-1.5, never more than 20 s (before W3, a 5 min cap). Only a `retry:false` reply stops the resending (see "Server reply").
   - From W3 (WO-98), Finish session never waits for the receiver: it queues the finish row, asks for a send at once and returns. The queue keeps sending in the background while the Finish screen counts the posts sent. "Download my data" appears only when rows are still unsent 120 s or more after Finish and the latest try failed (or the receiver refused them), and never within 20 s of a post the receiver acknowledged; a later acknowledgment withdraws it.
-  - On the Web, pending rows are kept in the browser's local storage (`lob_pt_queue_v1`, section 11), so they survive a page reload. The queue is persisted only when dirty; a failed write keeps it dirty for retry.
+  - On the Web, pending rows are kept in the browser's local storage (`lob_pt_queue_v1`, section 11), so they survive a page reload. From W7 (WO-218) the queue and the session's next `row_seq` are saved together each time a row is queued, so a row survives a crash or a closed tab and its number is never used again; before W7 they were saved at most once a second, and rows of the last second before a crash could be lost and their numbers used again. A failed write keeps them unsaved for retry.
+  - Each row is checked before it is queued. From W7 a check that runs out of time keeps the row (the receiver checks it again); a row that fails the check is dropped with one console warning that names only its kind and type, and its `row_seq` stays unused (a gap). Before W7 a check that ran out of time dropped the row without a warning.
   - On `pagehide`, the Web page sends the next unsent batch with `navigator.sendBeacon` as `text/plain`, unless its UTF-8 JSON exceeds 60 KB. C# refreshes the page's endpoint and batch JSON at most once a second when the batch changes. The beacon uses the same batch id as the queued POST, so the server deduplicates it; the client retains the rows until a POST is acknowledged.
   - A sending mode with a blank endpoint retains pending rows for "Download my data" without acknowledging them or making a network call, and offers the download at once at Finish. The download contains only the current session's rows.
 - **The sinks.** In the Editor and the Windows build, the same rows go to a local JSONL file instead of the network (`<persistentDataPath>/Playtest/session_<session>.jsonl`). `?mode=off` sends nothing and writes no rows, but still keeps local progress and settings (section 11).
+- **The local run file.** In the Editor and the Windows build only, every run line (`run_start`, `planning_stop`, the PM lines, `run_end`) is also appended to `<persistentDataPath>/PMO/Telemetry/run_<run>.jsonl` in the decision 44 format, in every mode, `off` included. It is not sent and not on the Web. The study event types of section 8 are not in it.
 - **The server.** The Google Apps Script web app (`apps-script/Code.gs` in the release repo):
   - validates each post;
   - ignores a batch id it has already appended, so retries never duplicate rows;
   - takes a lock and appends rows to the tab for their kind and mode, by header name (in every mode, any well-formed ID: there is no ID check);
   - adds a column when a new field arrives, up to 60 columns a tab (a post that would add more is refused whole, without retry);
   - stamps `server_time`.
+  - It does not check event types or `detail` keys, so a new type or key needs no receiver change.
 
 ### Post body
 ```json
@@ -88,7 +92,7 @@ At most 100 rows and 200 KB per post.
 | mode | text | `tryout` | `study`, `tryout` or `test`. |
 | build | text | `W1 2026-10-28` | Build label and date. |
 | code | text | `BLU4821` | Study ID (section 3). |
-| session | text (UUID) | `8f0c…4e11` | One per ID-screen Continue. A reload keeps the session only when code, mode and build match (within the resume window). |
+| session | text (UUID) | `8f0c…4e11` | One per ID-screen Continue. A reload keeps the session only when code, mode and build match, within 12 hours of the session's first start. After a reload the ID screen opens again and the session resumes when the player presses Continue with the same ID; the resumed session writes a second `start` row (section 5) and, from W7, a `resume` event (section 8). |
 | row_seq | integer | 7 | Order of the row within its session, from 1. |
 | client_time | text (ISO 8601 UTC) | `2026-10-28T19:04:58Z` | When the game made the row. |
 | server_time | text (ISO 8601 UTC) | `2026-10-28T19:05:13Z` | Added by the server on append. |
@@ -96,83 +100,198 @@ At most 100 rows and 200 KB per post.
 
 The game repeats the five post fields (`schema`, `mode`, `build`, `code`, `session`) on each row; the server checks that they match the post (`code` compared upper-case; a mismatch rejects the post) and stores the post's values.
 
+**Money and builds.** Money values from build W7 on include the site cost (Marathon 12 decision B1: a cost for each day of the job from Day 1 to its last day, $100 a day in the lessons and $1,000 in the Sandbox, on a line of its own beside indirect at 30% of direct, with profit at 5% of direct plus indirect plus the site cost). This applies to `runs.budget`, `runs.budget_left` and every `total` in section 8. Builds before W7 do not include it, so an analysis keeps builds apart by `build`.
+
 ## 5. sessions (kind = `session`)
 | Field | Type | Values | Meaning |
 |---|---|---|---|
-| phase | text | `start`, `finish` | `start` at ID-screen Continue; `finish` at Finish session. |
+| phase | text | `start`, `finish` | `start` at ID-screen Continue; `finish` at Finish session. A resumed session (section 4) writes `start` again with the same `session`, with `first_visit` FALSE. |
 | platform | text | `web`, `windows`, `editor` | Where the game ran. |
 | browser | text | `chrome`, `edge`, `firefox`, `safari`, `other`, `none` | Browser family only (not the full user agent). |
 | screen | text | `1920x1080` | Canvas size in pixels at start. |
 | first_visit | boolean | TRUE | No earlier session for this mode and code on this browser. |
 | intro_seen | boolean | FALSE | The intro was viewed before this session for this mode and code on this browser. |
-| seconds | integer | 1834 | (finish) Seconds from start to finish. |
+| seconds | integer | 1834 | (finish) Seconds from the session's first start to finish. For a resumed session this includes the time between the reload and the return. |
 | nodes_completed | integer | 4 | (finish) Distinct concept-map node ids completed this session. |
 | runs | integer | 3 | (finish) Runs started this session. |
-| pending | integer | 0 | (finish) Rows still unsent when Finish was pressed. |
+| pending | integer | 0 | (finish) Rows still unsent when Finish was pressed, not counting the finish row itself. Rows of the last minute are usually still pending, so a value above 0 is normal; the rows the receiver holds against `row_seq` show whether any were lost. |
 | downloaded | boolean | FALSE | (finish) Clicking "Download my data" appends a finish status row with TRUE and a new `row_seq`; existing queued and beacon batch rows remain immutable for deduplication. The file contains only the finished session's pending rows. |
 
 ## 6. progress (kind = `progress`): the concept map
 | Field | Type | Values | Meaning |
 |---|---|---|---|
 | node | text | `bar_chart` | Concept-map node id (`MD Files\_concept_map.md`). |
-| action | text | `open`, `complete`, `leave` | The node was opened, completed, or left unfinished. |
+| action | text | `open`, `complete`, `leave` | The node was opened, completed, or left unfinished. A reload or a closed tab writes no `leave`. |
 | seconds | integer | 142 | Seconds in the node (`complete`, `leave`). |
-| attempts | integer | 2 | Attempts at the node's task, where it has one. |
-| level | text | `L08` | The training or route the node opens, if any. |
+| attempts | integer | 2 | Attempts at the node's task, where it has one: in the Sandbox the attempt on its site (1 for the first try, one more for each retry); from W7 in Bars to lines the number of `task_attempt` releases (section 8) in that opening. |
+| level | text | `bar_chart` | The node id again for every lesson and the Sandbox (`event_response`, `sandbox_run`); absent on the intro's rows. |
 
 ## 7. runs (kind = `run`): decision 44 run summaries
 | Field | Type | Values | Meaning |
 |---|---|---|---|
-| run | text (UUID) | `c41e…` | Decision 44 run id. |
+| run | text | `9f2c4e7a1b3d4c5e8f6a7b9c0d1e2f3a` | The site run's id, 32 hex digits. New on every load of a lesson, Plan again, Replan and Sandbox Retry. |
 | phase | text | `start`, `end` | Run start or end. |
-| level | text | `sandbox`, `L07_TutorialEventResponse` | Route or level id (internal ids, not display numbers). Added by the game, not by decision 44's line. |
+| level | text | `event_response`, `sandbox_run` | The node id (internal ids, not display numbers). Added by the game, not by decision 44's line. |
 | node | text | `event_response` | The concept-map node it was opened from, if any. |
-| site | text | `seoul` | (start) The site or city profile id (decision 44's `project`). |
-| difficulty | text | `normal` | Tier. |
-| seed | integer | 123456 | Root seed (decision 44). |
-| deadline | integer | 100 | (start) Deadline day. |
-| budget | number | 650000 | (start) The run's starting budget. |
-| guided | boolean | FALSE | (start) The guided Training 8 bridge. |
-| day | integer | 46 | Sim day of the line (0 at start). |
-| outcome | text | `won`, `lost` | (end) How it ended. Abandoning is recorded as a `run_abandoned` event, not a run outcome. |
-| reason | text | `deadline` | (end) The engine's outcome reason id. |
-| score | number | 1840 | (end) The run's final score. |
-| budget_left | number | 37500 | (end) Budget remaining at the end. |
-| seconds | integer | 615 | (end) Real seconds played. Added by the game. |
+| site | text | `chicago` | (start) The site or city profile id (decision 44's `project`). |
+| difficulty | text | `normal` | Tier, lower-case; `normal` for every lesson. |
+| seed | integer | 7919 | Root seed: 0 in a lesson, 7919 x the attempt in the Sandbox. |
+| deadline | integer | 19 | (start) Deadline day; absent where the lesson has none. |
+| budget | number | 31321 | (start) The run's budget; absent where the lesson has none. |
+| guided | boolean | FALSE | (start) Always FALSE. |
+| day | integer | 17 | Sim day of the line (0 at start, the last day at end). |
+| outcome | text | `won` | (end) Always `won`: every run that reaches its end is finished. Lateness is in `reason`. `lost` is not written. |
+| reason | text | `finished`, `late` | (end) The engine's outcome reason id. |
+| score | number | 2 | (end) The run's stars, 0 to 3 (0 where the lesson has no targets). From W7, in Crew spacing, the stars of the report card's two gap targets (the 1-day gap and the 5-day gap); before W7 there the stars of the exercise's own target, which could differ from the card. |
+| budget_left | number | 4977 | (end) The budget minus the total; absent without a budget. |
+| seconds | integer | 615 | (end) Real seconds since `run_start` in this page. Added by the game. |
+
+A run left before its end (Back and Leave, Plan again, a conflict card's Replan, a reload or a closed tab) has a `start` row and no `end` row. There is no abandon row (section 8).
 
 ## 8. events (kind = `event`): decision 44 telemetry lines and lesson events
 | Field | Type | Values | Meaning |
 |---|---|---|---|
-| run | text | `c41e…` | Decision 44 run id; empty for lesson events outside a run. |
-| seq | integer | 12 | Decision 44 sequence within the run; for lesson events, the session's own count. |
-| day | integer | 9 | Sim day (0 outside a run). |
-| type | text | `planning_stop`, `intro_view` | The telemetry event type (decision 44), or a lesson event (below). |
-| detail | text (JSON) | `{"crew":"PipeLaying"}` | The line's own key/value pairs as compact JSON. Values come from the game, never from player typing. |
+| run | text | `9f2c…2f3a` | The site run's id; empty for lesson events outside a run, for the site card's `task_attempt` flag and for `resume`. |
+| seq | integer | 12 | For run lines (`planning_stop`, the PM lines): decision 44's sequence within the run. Run rows take numbers from it without carrying `seq`, and the advice lines take numbers before `run_start`, so within a run it starts above 1 and has gaps by design. For lesson events and the study event types below: the row's own `row_seq`. |
+| day | integer | 9 | Sim day (0 outside a run and in planning). |
+| type | text | `planning_stop`, `intro_view` | The telemetry event type (decision 44), or a lesson or study event (below). |
+| detail | text (JSON) | `{"crew":"PipeLaying"}` | The line's own key/value pairs as compact JSON. Values come from the game, never from player typing. On run lines every value is a JSON string (`{"pending":"1"}`, `{"used":"true"}`); on lesson events and the study event types numbers stay JSON numbers and true and false stay JSON booleans. |
 
-Run abandonment is an event with `type=run_abandoned`, emitted when the player abandons the run; it is not `runs.outcome=quit`.
+Run abandonment (`run_abandoned`) is named by decision 44 but no build writes it: a left run is a `run_start` (from W7 followed by a `plan`) with no `run_end` and no `result`.
+
+Run lines:
+- `planning_stop` (`detail`: `{"pending":"1"}`, always): the run stopped at an event, before its card. It does not name the event (from W7 the `response` row does).
 
 Lesson event types:
 - `intro_view` (`detail`: `{"part":"crews"}` …);
-- `intro_skip`;
-- `task_attempt` (`detail`: `{"node":"bar_chart","correct":false}`); in Site preparation the risk flagged on the site card, logged and never graded (`detail`: `{"node":"site_preparation","flag":"P1"}`, the event id);
+- `intro_skip` (`detail`: `{"part":"<the cue skipped at>"}`);
+- `task_attempt`:
+  - in Site preparation and the Sandbox, the risk flagged on the site card, logged and never graded (`detail`: `{"node":"site_preparation","flag":"P1"}`, the event id; in the Sandbox `node` is `sandbox_run`). One row each time a flag is set. It is written with `run` empty and `day` 0 although a planning run is loaded.
+  - from W7, in Bars to lines, see the study event types below. The shape `{"node":"bar_chart","correct":false}` listed before W7 is not written by this build.
 - `audio_change` (`detail`: `{"mode":"full|background|off","volume":n}`, for example `{"mode":"background","volume":0.6}`): the main screen's Audio setting (SIM.L15) and master volume, logged when either changes. Before W3 the detail held only `volume`.
 
 PM suggestion event types (SR53, Marathon 10 decision 15). Event response, Site preparation and the Sandbox's Easy and Normal tiers write them. Every value is composed by the game, never player typing:
-- `pm_suggestion` (`detail`: `{"id":"job.P1.borrow.heavy","family":"P1","stop":"1"}`): the PM spoke a suggestion.
+- `pm_suggestion` (`detail`: `{"id":"job.P1.borrow.heavy","family":"P1","stop":"0"}`): the PM spoke a suggestion.
   - `id` is composed `job.<event>.<action>[.<size>][.<crew>][+<days>]`: the event id as written (`E1`, `P1`), the action (`play`, `fix`, `hire`, `borrow`), the size for a hire or a borrow, the crew only for a site-wide hire, and each later start as `.<crew>+<days>` (`job.P1.borrow.heavy.backfill+1`). Before a Site preparation or Sandbox run the advice is `job.advise` plus the suggested preventions joined by `+` (`job.advise.P1+B1+A2`), or `job.advise` alone for none.
   - `family` is the event id; for the advice, the event flagged on the site card.
-  - `stop` is the event's index in the run; 0 for the advice before the run.
-- `pm_suggestion_used` (`detail`: `{"id":"job.P1.borrow.heavy","used":"true","stop":"1"}`): written at Play for each suggestion spoken at that pause (for the advice, at Run). `used` is `true` when the chosen response and later starts are the suggestion (for the advice, when the bought preventions are the suggested set), otherwise `false`.
+  - `stop` is the event's place among the events known so far, counted from 0 (the first event is `"0"`); 0 for the advice before the run. The `id` prefix `job.advise` tells the advice apart.
+  - The advice is written once a risk is flagged and again on every change of the plan or the preventions while planning. The PM works the advice out over a few frames, so it is written when it is ready; a Run pressed before it is ready writes no advice line and no advice `pm_suggestion_used`.
+  - Crews in an `id` are spelled `excavation`, `pipe_laying`, `backfill`; the study event types below spell them `Excavation`, `PipeLaying`, `Backfill`.
+- `pm_suggestion_used` (`detail`: `{"id":"job.P1.borrow.heavy","used":"true","stop":"0"}`): written at Play for each suggestion spoken at that pause (for the advice, at Run, just before `run_start`). `used` is `true` when the chosen response and the later starts in force are the suggestion (for the advice, when the bought preventions are the suggested set), otherwise `false`.
 
-Sandbox crowding edges (WO-130, SR49), emitted once per crew when accepted daily seating changes between crowded and clear:
-- `crowded`: at least one assigned, available machine waits for room.
-- `crowded_end`: that crew no longer has a machine waiting for room.
+Sandbox crowding edges (WO-130, SR49): `crowded` (at least one assigned, available machine waits for room) and `crowded_end` (that crew no longer has a machine waiting for room). They are defined for the existing model-record payload (`detail` exactly one crew enum, `Excavation`, `PipeLaying`, `Backfill`; `profile` the city id; `configuration` the catalog version; `day` the accepted day), but no build writes them: the crowding is counted in memory only.
 
-Both use the existing model-record payload: `detail` is exactly one crew enum (`Excavation`, `PipeLaying`, `Backfill`), `profile` is the city id, and `configuration` is the catalog version. The row's `day` is the accepted day. No player text, names or email addresses. No daily repetition and no record for a crew that never crowds. The telemetry schema remains 1; the run-save schema is 9 since Marathon 10 (section 9).
+### Study event types (Marathon 12 decision D2, from build W7)
+Seven lines that show what a player planned and chose. They use the existing columns: kind `event`, a `type`, and `detail` as compact JSON of values the game composes. Nothing in them is typed by the player. For all of them:
+- `run` is the site run's id (section 7), except `resume`, whose `run` is empty.
+- `seq` is the row's own `row_seq`.
+- `day` is the run's day when the row is made: 0 in planning, the stop's day at an event or a conflict, the day being played otherwise, the last day at the end; 0 for `resume`.
+- Crews are `Excavation`, `PipeLaying`, `Backfill`. Sizes are `small`, `standard`, `heavy`. Events and preventions are named by their id (`P1`, `B1`, `A2`); a set is joined by `+` in the engine's event order, and an empty set is `""`. Actions are `play`, `fix`, `hire`, `borrow`.
+- Days are whole numbers. A start day is the day the player sees on the chart's axis. A job's days are the forecast's or the result's project days.
+- Money is in whole dollars and includes the site cost (section 4).
+- `?mode=off` writes none of them.
+- The examples are the strings the game's EditMode tests check. Where a test takes `days` and `total` from the engine, the numbers shown are the engine's tested values for that plan. None is a row captured from a played session yet.
+
+`plan`: at every Run, right after `run_start`; in the Sandbox at every attempt's Run.
+
+| Key | Format | Meaning |
+|---|---|---|
+| exc | text `s-t-h` | Excavation's machines by size: the count of small, standard and heavy, joined by `-`. |
+| pipe | text `s-t-h` | Pipe laying's machines by size. |
+| back | text `s-t-h` | Backfill's machines by size. |
+| starts | text `e-p-b` | The start days of Excavation, Pipe laying and Backfill, joined by `-`. |
+| prev | text | The preventions bought, joined by `+`; `""` for none. |
+| days | integer | The forecast's job days at Run. At Run the forecast knows no event yet. |
+| total | integer | The forecast's total at Run, in dollars, preventions included. |
+| conflict_days | integer | The forecast's conflict days at Run: the held days of each crew added together (not the number of conflict stops). 0 for none. |
+
+Example (the game's sample plan, the one Fleet planning's targets are set on, nothing bought): `{"exc":"0-1-1","pipe":"0-0-2","back":"0-1-1","starts":"1-3-5","prev":"","days":7,"total":23107,"conflict_days":0}`. With P1 and B1 bought, in either order, `prev` is `"P1+B1"`.
+
+`response`: at every event's Play, once, before the run goes on.
+
+| Key | Format | Meaning |
+|---|---|---|
+| event | text | The event's id. |
+| action | text | `play`, `fix`, `hire` or `borrow`. |
+| size | text | (hire, borrow) The machine's size. |
+| from | text | (borrow) The crew that lends the machine. |
+| to | text | (hire at a site-wide event) The crew that receives the machine. Absent for a hire at an event on one crew, and absent when a site-wide hire has no receiving crew (never `"-1"`). |
+| days | integer | The forecast's job days after this response, with the start days in force at Play. |
+| total | integer | The forecast's total after this response, in dollars. |
+| pm | boolean | TRUE when the response taken is the PM's pick on that card: the card's opening pick, complete with the later starts it needs, as the player has them at Play. It is the same value as `pm_suggestion_used` at that Play. A Play with no row selected takes plain Play (or a hire made with the crew's counter), and is TRUE when that is the PM's pick; a pick whose later starts the player has not made is FALSE. FALSE where the PM is silent (Hard and Hardcore). |
+
+An event Play that the game refuses (a trench collapse cannot be played through) writes nothing; the row comes with the Play that goes through. A run left at an event card (Back then Leave, a reload) has a `planning_stop` and no `response` for that event.
+
+Examples. The test holds the forecast fixed at the plain sample plan's, so `days` and `total` here show the format only, not the cost of each response: a borrow `{"event":"B1","action":"borrow","size":"heavy","from":"Excavation","days":7,"total":23107,"pm":true}`; a fix `{"event":"B1","action":"fix","days":7,"total":23107,"pm":false}`; a hire at a site-wide event `{"event":"A2","action":"hire","size":"heavy","to":"PipeLaying","days":7,"total":23107,"pm":false}`; the same hire with no receiving crew `{"event":"A2","action":"hire","size":"heavy","days":7,"total":23107,"pm":false}`.
+
+`move`: for every start the player moves and every crew the player pauses or lets go on. One row per drag, written at the release, for each crew whose start changed (never one per day crossed; a start dragged back to where it was writes none); one row per pause and one per resume. Once the run has begun the chart lets a start move only later, so `earlier` comes only from planning. When one drag moves two crews, both rows carry the same `conflict_before` and `conflict_after`.
+
+| Key | Format | Meaning |
+|---|---|---|
+| crew | text | The crew moved. |
+| move | text | `later` (a later start), `earlier` (an earlier start, in planning only), `pause` (a started crew stops, paid), `resume` (a paused crew goes on). |
+| days | integer | (later, earlier) The whole days the start moved, always positive. (resume) The whole days that passed while the crew stood paused, 0 when it goes on the same day. A `pause` has no `days`: its length is known only at its `resume`; a pause never resumed lasts to the run's end. |
+| at | text | When: `planning` (before Run), `event` (an event card is open), `conflict` (the run stands at a conflict), `other` (the run is playing or paused). |
+| conflict_before | boolean | TRUE when, just before the move, the forecast shows a conflict still ahead: the same conflict the screen's red circle marks. Conflicts already met earlier in the run do not count. |
+| conflict_after | boolean | The same, just after the move. |
+
+Example: `{"crew":"Backfill","move":"later","days":1,"at":"event","conflict_before":true,"conflict_after":false}`; a later start that clears the conflict ahead although conflict days were already met: `{"crew":"Backfill","move":"later","days":48,"at":"other","conflict_before":true,"conflict_after":false}`; an earlier start in planning: `{"crew":"Backfill","move":"earlier","days":1,"at":"planning","conflict_before":false,"conflict_after":true}`; a pause: `{"crew":"Excavation","move":"pause","at":"other","conflict_before":false,"conflict_after":false}`; its resume: `{"crew":"Excavation","move":"resume","days":0,"at":"other","conflict_before":false,"conflict_after":false}`
+
+`conflict`: at a conflict stop, once, when the player presses on it: Play (the card's or the transport's), Replan, or Back then Leave. A stop the player never presses on (a reload, a closed tab, a crash) writes no `conflict` row. Runs stop at conflicts in Crew conflicts, Crew spacing, Production rate, Fleet planning, Event response, Site preparation and the Sandbox; Replan is offered only in Crew conflicts, Crew spacing, Production rate and Fleet planning.
+
+| Key | Format | Meaning |
+|---|---|---|
+| crew | text | The held crew. |
+| ahead | text | The crew ahead. |
+| day | integer | The stop's day, the day the conflict card names. |
+| ft | integer | Where the held crew meets the crew ahead, in whole feet. |
+| days | integer | The days of the held stretch. |
+| then | text | What the player pressed: `play`, `replan`, or `leave` (back to the map from the conflict). Back followed by Stay is not a press. |
+
+Example: `{"crew":"Backfill","ahead":"PipeLaying","day":8,"ft":240,"days":2,"then":"play"}`; the other presses write `"then":"replan"` and `"then":"leave"`.
+
+`result`: at every run's end, right after `run_end`. The run row keeps its fields. A run left before its end has no `result`.
+
+| Key | Format | Meaning |
+|---|---|---|
+| days | integer | The job's days. |
+| total | integer | The total, in dollars. |
+| late | integer | Days past the deadline (0 when on time or without a deadline). |
+| waiting | integer | Waiting days, summed over the crews. |
+| conflict_days | integer | Conflict days: the held days of each crew added together. |
+| met | text | The targets met, joined by `+` in the lesson's order; `""` for none. |
+| missed | text | The targets missed, the same way. |
+| stars | integer | The stars, 0 to 3 (0 where the lesson has no targets); always equal to the `run_end` row's `score` and to the report card. |
+
+Targets are named by kind, never by their display text: `deadline`, `budget`, `no_conflict`, and two kinds that carry their number in the name, with no separator: `days_at_most` followed by its days (`days_at_most13`) and `gap_before` followed by its days (`gap_before1`, `gap_before5`). A lesson without targets writes `"met":""`, `"missed":""` and `"stars":0`. The targets are the report card's own; in Crew spacing the card's two gap targets. In the code of 2026-11-23: Meet the site, Bar chart, Bars to lines and Start days have none; Crew conflicts has `no_conflict` and `days_at_most13`; Crew spacing `gap_before1` and `gap_before5`; Production rate `no_conflict` and `days_at_most12`; Fleet planning, Event response, Site preparation and the Sandbox `deadline` and `budget`. In Crew conflicts the lesson can send the player back to planning when a run ends instead of showing the report card; that run keeps its `run_end` and `result`, and the next Run has a new `run`.
+
+Example (the sample plan run in Fleet planning, against its 10-day deadline and $25,000 budget): `{"days":7,"total":23107,"late":0,"waiting":0,"conflict_days":0,"met":"deadline+budget","missed":"","stars":3}`; Crew spacing with the 1-day gap: `{"days":14,"total":23856,"late":0,"waiting":0,"conflict_days":0,"met":"gap_before1","missed":"gap_before5","stars":2}`; Crew conflicts opening: `{"days":12,"total":24056,"late":0,"waiting":1,"conflict_days":2,"met":"days_at_most13","missed":"no_conflict","stars":2}`
+
+`task_attempt` in Bars to lines (Marathon 12 decision A1): one row per release of a crew's days, before the lift. Lifting alone is not another attempt. The progress row's `attempts` for the node counts them (section 6). It is written in planning, with the planning run's `run` and `day` 0.
+
+| Key | Format | Meaning |
+|---|---|---|
+| node | text | `bars_to_lines`. |
+| crew | text | The crew being made. |
+| days | integer | The days the player released on. |
+| correct | boolean | TRUE when those days are the days the crew needs for the trench at its rate. It is data only: the player sees no mark of right or wrong. |
+
+Example: `{"node":"bars_to_lines","crew":"PipeLaying","days":7,"correct":false}`
+
+`resume`: when a session comes back after a reload, right after its second `start` row (section 5), that is when the player presses Continue on the ID screen of the reloaded page with the same ID, mode and build within 12 hours of the session's first start. A new session writes none.
+
+| Key | Format | Meaning |
+|---|---|---|
+| cause | text | `error` when the page's Reload button was pressed after the game stopped (the reload panel); otherwise `reload`, which also covers a tab closed and opened again within the resume window. |
+
+Example: `{"cause":"error"}`; otherwise `{"cause":"reload"}`
+
+Not written by any row: a hired machine sent away early with the counter's minus during a run (it changes the run's days and total, which `result` shows), changes of game speed, the cost table opened or closed, and machine counts or preventions changed before Run (only the plan at Run is written, in `plan`; start moves in planning do write `move`).
 
 ## 9. Change log
 | Schema | Date | Change |
 |---|---|---|
+| 1 | 2026-11-22 | Marathon 12 decision D2 (WO-218), from build W7: seven study event types in the existing events tab (section 8): `plan`, `response`, `move`, `conflict`, `result`, `resume`, and `task_attempt` in Bars to lines with the keys `crew`, `days` and `correct`. `plan` and `result` both name their conflict days `conflict_days`; a target with a number carries it in its name (`days_at_most13`, `gap_before5`); `move`'s `conflict_before` and `conflict_after` say whether the forecast shows a conflict still ahead, and a `pause` has no `days`; `response.pm` is TRUE when the response taken is the PM's pick on that card (the same value as `pm_suggestion_used`), and `response.to` is absent when a site-wide hire has no receiving crew; `conflict` also carries the held stretch's `days`; a `conflict` row is written once, when the player presses Play, Replan or Leave, so a conflict stop ended by a reload or a closed tab has no row. Their `seq` is the row's own `row_seq`, and numbers and booleans in their `detail` stay JSON numbers and booleans. Crew spacing's run `score` now counts the report card's two gap targets, so the run row, the `result` row and the card agree. The queue and the next `row_seq` are saved at every queued row, and a row check that runs out of time keeps the row (section 1). Money values from W7 include the site cost (decision B1, section 4). Corrections to match the code: `run_abandoned`, `crowded` and `crowded_end` are not written; `runs.outcome` is always `won`; `level` is the node id; `pm_suggestion.stop` counts from 0; a resumed session writes a second `start` row; run-line `detail` values are strings and run-line `seq` has gaps; the site card's `task_attempt` flag has `run` empty and `day` 0; the local run file (section 1), the stars keys and the reload marker (section 11) are listed; a resumed session's finish `seconds` includes the time away; the PM's advice is written when it is ready; the crew spellings of `pm_suggestion` ids are named; what no row records is listed (section 8). No new fields, columns or kinds; the schema stays 1. |
 | 1 | 2026-11-16 | Marathon 11 decision 0 (WO-170, WO-171), receiver 1.2.0: the player makes the study ID (a color's three letters and four digits, `BLU4821`; section 3), so there is no list of codes and no key to names. In study mode every well-formed ID goes to the study tabs; the `codes` tab is no longer read and nothing new goes to `unmatched` (`target_tab` is legacy). `?op=code` answers `known` for any well-formed code. The success reply gains `tabs`, a reply field only. Automated checks use `GRY0000` to `GRY0009`. No new fields or columns; the schema stays 1. |
 | 1 | 2026-11-04 | Marathon 10's one model (decision 16, WO-162). Run rows keep their fields with these meanings: `budget` the run's budget (the frame), `budget_left` the budget minus the total, `score` the stars (0 to 3), `deadline` the deadline day, `reason` an id (`finished`, `late`), `site` the city id. In the Sandbox each report card writes one complete progress row whose `attempts` is the attempt (1 for the first try, one more for each retry on the same site), and the run's `seed` is that attempt's draw seed (7919 x the attempt); a lesson's `seed` is 0. `task_attempt` keeps its `flag` key (WO-159). `pm_suggestion` ids are composed by the game (section 8); the retired `pm_suggestions.json` ids are no longer written. The run-save schema goes to 9 and an older run save reads as no run (decision 17); `save.json` and `attempts.json` are left untouched and no longer written. No new fields or columns; the schema stays 1. |
 | 1 | 2026-11-02 | `crowded` and `crowded_end` model-record event types (WO-130); existing payload and columns. |
@@ -190,13 +309,16 @@ The game keeps these keys in the browser's local storage (in the Editor and the 
 
 | Key | Holds |
 |---|---|
-| `lob_pt_session_v1` | The current session (code, mode, build, session id, start time, next `row_seq` and its finish row's counts), so a reload can resume it (section 4), and the mode-and-code pairs that have visited or seen the intro. |
-| `lob_pt_queue_v1` | Each session's rows the receiver has not acknowledged yet, so a reload resumes sending; "Download my data" exports them. |
+| `lob_pt_session_v1` | The current session (code, mode, build, session id, start time, next `row_seq` and its finish row's counts), so a reload can resume it (section 4), and the mode-and-code pairs that have visited or seen the intro. From W7 saved at every queued row. |
+| `lob_pt_queue_v1` | Each session's rows the receiver has not acknowledged yet, so a reload resumes sending; "Download my data" exports them. From W7 saved at every queued row. |
 | `lob.map.v1.<mode>.<CODE>` | The concept-map nodes this code has completed in this mode. |
 | `lob.map.v1.started.<mode>.<CODE>` | The nodes this code has opened in this mode, done or not (SR52). |
+| `lob.map.v1.stars1.<mode>.<CODE>`, `lob.map.v1.stars2.<mode>.<CODE>`, `lob.map.v1.stars3.<mode>.<CODE>` | The nodes whose best report card in this mode reached at least one, two and three stars (Marathon 10 decision 22). A lower score never lowers them. |
 | `lob.flow.v1.<mode>.<CODE>` | The step of the opening flow (SR51) this code has reached in this mode, so a return resumes there. |
 | `lob_audio_mode_v1` | The Audio setting: `full`, `background` or `off` (SIM.L15). |
 | `lob_master_volume_v1` | The master volume, from 0 to 1. |
 | `lob.save.owner`, `lob.run.owner` | The code that owns the saved game or the saved run (section 2). Not written since Marathon 10 (no level save, no mid-run restore); an older one is left untouched. |
+
+One key lives in the tab's session storage, not local storage: `lob_reload_cause`. The page writes `error` there when its Reload button is pressed after the game stopped; from W7 the game reads it once when the page loads, removes it, and uses it only for the `resume` event's `cause` (section 8).
 
 `?mode=off` sends nothing and writes neither `lob_pt_session_v1` nor `lob_pt_queue_v1`, but still keeps local progress (under the mode `off`) and the audio settings. Before Marathon 10, Unity itself kept the saved game and the saved run, and two game preferences (`lob.tutorial5_complete`, `lob_project_last_failed_site`), in the browser's IndexedDB: game state only. The game no longer writes them (WO-162); an older copy is left untouched.
