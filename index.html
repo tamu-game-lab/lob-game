@@ -38,10 +38,13 @@
 
           <section id="lob-error" class="lob-panel lob-panel--error" role="alert" aria-labelledby="lob-error-title" hidden>
             <h1 id="lob-error-title" class="lob-title">The game could not load</h1>
-            <p class="lob-message">Please use an up-to-date Chrome, Edge or Firefox on a laptop or desktop computer, then reload this page.</p>
-            <p class="lob-error-label">Error details</p>
+            <p id="lob-error-message" class="lob-message">Please use an up-to-date Chrome, Edge or Firefox on a laptop or desktop computer, then reload this page.</p>
+            <p id="lob-error-label" class="lob-error-label">Error details</p>
             <pre id="lob-error-text" class="lob-error-text"></pre>
             <button type="button" id="lob-reload" class="lob-button">Reload page</button>
+            <details id="lob-error-details" class="lob-error-details" hidden>
+              <summary>Details</summary>
+            </details>
           </section>
         </div>
 
@@ -50,7 +53,7 @@
 
       <footer id="unity-footer">
         <span id="unity-build-title">Line of Balance</span>
-        <span id="lob-version">v1.6-W6c</span>
+        <span id="lob-version">v1.6-W6d</span>
         <span class="lob-footer-spacer"></span>
         <button type="button" id="unity-fullscreen-button" class="lob-footer-button" autocomplete="off" disabled>
           <svg class="lob-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -93,7 +96,11 @@
         var loadingStatus = document.querySelector("#lob-loading-status");
         var loadingPercent = document.querySelector("#lob-loading-percent");
         var errorPanel = document.querySelector("#lob-error");
+        var errorTitle = document.querySelector("#lob-error-title");
+        var errorMessage = document.querySelector("#lob-error-message");
+        var errorLabel = document.querySelector("#lob-error-label");
         var errorText = document.querySelector("#lob-error-text");
+        var errorDetails = document.querySelector("#lob-error-details");
         var reloadButton = document.querySelector("#lob-reload");
         var warningBanner = document.querySelector("#unity-warning");
         var fullscreenButton = document.querySelector("#unity-fullscreen-button");
@@ -102,6 +109,7 @@
         var started = false;   // the Unity loader has been requested
         var ready = false;     // createUnityInstance() has resolved
         var failed = false;    // the error panel is showing
+        var runtimeFailure = false;
         var shownProgress = 0;
 
         // Page state for styling and automated checks: notice | loading | ready | error.
@@ -125,20 +133,49 @@
           return text || "Unknown error.";
         }
 
+        function lobFailureWords(message, running) {
+          if (!running) {
+            return {
+              title: "The game could not load",
+              line: "Please use an up-to-date Chrome, Edge or Firefox on a laptop or desktop computer, then reload this page."
+            };
+          }
+          var text = message === null || message === undefined ? "" : String(message.message || message);
+          // "OOM" is Emscripten's own word and is matched as written, so "zoom" or "room" in another error never reads as memory.
+          var memory = /\bOOM\b/.test(text) || /out of memory|Cannot enlarge memory|could not allocate memory|Array buffer allocation failed|Invalid array buffer length|Invalid typed array length/i.test(text);
+          return {
+            title: memory ? "The game ran out of memory." : "The game stopped.",
+            line: "Reload to continue. Your progress is saved."
+          };
+        }
+
         function showError(message) {
-          var text = plainText(message);
           if (failed) {
-            // Keep the first (root-cause) error on screen; later ones go to the console.
-            if (window.console) console.error(text);
+            // Keep the first (root-cause) error on screen. A later load error goes to the console;
+            // a game that has stopped can report on every frame, so those are dropped.
+            if (!runtimeFailure && window.console) console.error(plainText(message));
             return;
           }
           failed = true;
+          runtimeFailure = ready;
+          var text = plainText(message);
+          var words = lobFailureWords(text, runtimeFailure);
           setState("error");
           overlay.hidden = false;
           deviceNotice.hidden = true;
           loadingBar.hidden = true;
+          errorTitle.textContent = words.title;
+          errorMessage.textContent = words.line;
           errorText.textContent = text;
+          if (runtimeFailure) {
+            errorLabel.hidden = true;
+            errorDetails.appendChild(errorText);
+            errorDetails.open = false;
+            errorDetails.hidden = false;
+            reloadButton.textContent = "Reload";
+          }
           errorPanel.hidden = false;
+          reloadButton.focus();
         }
 
         function addBanner(text, type) {
@@ -247,21 +284,22 @@
         // ---- Unity loader (as in Unity 6000.3's Default template) -------------
 
         var buildUrl = "Build";
-        var loaderUrl = buildUrl + "/Web_W6c.loader.js";
+        var loaderUrl = buildUrl + "/Web_W6d.loader.js";
         var config = {
           arguments: [],
-          dataUrl: buildUrl + "/Web_W6c.data.unityweb",
-          frameworkUrl: buildUrl + "/Web_W6c.framework.js.unityweb",
-          codeUrl: buildUrl + "/Web_W6c.wasm.unityweb",
+          dataUrl: buildUrl + "/Web_W6d.data.unityweb",
+          frameworkUrl: buildUrl + "/Web_W6d.framework.js.unityweb",
+          codeUrl: buildUrl + "/Web_W6d.wasm.unityweb",
           streamingAssetsUrl: "StreamingAssets",
           companyName: "DefaultCompany",
           productName: "LOB-Game",
-          productVersion: "1.6-W6c",
+          productVersion: "1.6-W6d",
           showBanner: unityShowBanner,
-          // errorHandler: function (err, url, line) {
-          //   // Return true if the error was handled and Unity should not process it further.
-          //   return true;
-          // },
+          errorHandler: function (err, url, line) {
+            if (failed) return true;
+            showError(err);
+            return true;
+          },
         };
 
         // Data caching: with Player Settings > Publishing Settings > Data Caching on, the Unity 6
@@ -293,6 +331,7 @@
         }
 
         function onReady(unityInstance) {
+          if (runtimeFailure) return;
           ready = true;
           setState("ready");
           loadingBar.hidden = true;
@@ -351,7 +390,23 @@
         // ---- Start ------------------------------------------------------------
 
         reloadButton.addEventListener("click", function () {
+          if (runtimeFailure) {
+            try {
+              window.sessionStorage.setItem("lob_reload_cause", "error");
+            } catch (error) {
+              // Reload remains available when browser storage is blocked.
+            }
+          }
           window.location.reload();
+        });
+
+        // Unity cancels every keypress while its listeners live, the stopped game included, so Enter on the
+        // focused Reload button would do nothing. Take Enter on keydown; Space still acts on keyup.
+        reloadButton.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" && !e.repeat) {
+            e.preventDefault();
+            reloadButton.click();
+          }
         });
 
         if (isTouchFirstDevice()) {

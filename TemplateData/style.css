@@ -257,6 +257,24 @@ body {
   word-break: break-word;
 }
 
+.lob-error-details {
+  margin-top: 16px;
+}
+
+.lob-error-details summary {
+  cursor: pointer;
+  color: var(--lob-muted);
+}
+
+.lob-error-details summary:focus-visible {
+  outline: 2px solid var(--lob-accent);
+  outline-offset: 2px;
+}
+
+.lob-error-details .lob-error-text {
+  margin: 10px 0 0;
+}
+
 /* Unity warning / error banner (config.showBanner), pinned to the top of the game. */
 
 #unity-warning {
