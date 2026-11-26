@@ -53,7 +53,7 @@
 
       <footer id="unity-footer">
         <span id="unity-build-title">Line of Balance</span>
-        <span id="lob-version">v1.15-W15</span>
+        <span id="lob-version">v1.16-W16</span>
         <span class="lob-footer-spacer"></span>
         <button type="button" id="unity-fullscreen-button" class="lob-footer-button" autocomplete="off" disabled>
           <svg class="lob-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -64,6 +64,7 @@
 
     <noscript><div class="lob-noscript">Line of Balance needs JavaScript. Please turn it on, or use Chrome, Edge or Firefox on a laptop or desktop computer.</div></noscript>
 
+    <script src="TemplateData/lob_pace.js"></script>
     <script>
       // Line of Balance - Unity 6000.3 WebGL template, built from Unity's Default template.
       // Unity preprocesses this file at build time: keep its template expressions and the
@@ -284,16 +285,16 @@
         // ---- Unity loader (as in Unity 6000.3's Default template) -------------
 
         var buildUrl = "Build";
-        var loaderUrl = buildUrl + "/Web_W15.loader.js";
+        var loaderUrl = buildUrl + "/Web_W16.loader.js";
         var config = {
           arguments: [],
-          dataUrl: buildUrl + "/Web_W15.data.unityweb",
-          frameworkUrl: buildUrl + "/Web_W15.framework.js.unityweb",
-          codeUrl: buildUrl + "/Web_W15.wasm.unityweb",
+          dataUrl: buildUrl + "/Web_W16.data.unityweb",
+          frameworkUrl: buildUrl + "/Web_W16.framework.js.unityweb",
+          codeUrl: buildUrl + "/Web_W16.wasm.unityweb",
           streamingAssetsUrl: "StreamingAssets",
           companyName: "DefaultCompany",
           productName: "LOB-Game",
-          productVersion: "1.15-W15",
+          productVersion: "1.16-W16",
           showBanner: unityShowBanner,
           errorHandler: function (err, url, line) {
             if (failed) return true;
@@ -358,6 +359,10 @@
           setState("loading");
           deviceNotice.hidden = true;
           loadingBar.hidden = false;
+
+          // E29 (WO-287): the game's frames are paced by time from here on, before the loader is asked for; ?pace=off in the link
+          // leaves the browser's own requestAnimationFrame (W15's page). Without lob_pace.js the page is W15's too.
+          if (window.lobPace) window.lobPace.install(window, window.location.search);
 
           script = document.createElement("script");
           script.src = loaderUrl;
